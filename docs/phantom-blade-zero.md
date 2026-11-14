@@ -1,14 +1,14 @@
-# Phantom Blade Zero on Steam Deck: experimental FSR 4.1
+# Phantom Blade Zero on Steam Deck: FSR 4.1
 
-This build is a test package, not a verified game compatibility result. It bundles an official fixed OptiScaler **0.9.5-pre5** core and the community **FSR 4.1.1b INT8 RDNA2 fix**. Neither the maintainers' Windows result nor the plugin's synthetic tests prove Steam Deck performance or stability.
+This build is a test package with one-device gameplay validation; it is not a general compatibility guarantee. It bundles an official fixed OptiScaler **0.9.5-pre5** core and the community **FSR 4.1.1b INT8 RDNA2 fix**. Neither the maintainers' Windows result nor the plugin's synthetic tests prove Steam Deck performance or stability.
 
 ## Set up
 
 1. Close the game. Install this Decky zip and open the game's **Setup** page.
 2. The real target is the directory containing the main/big `PBZ.exe`: normally `PBZ/platform/steam`. Do not use the usual Unreal `Binaries/Win64` location. The plugin prefers the canonical folder when it exists and there is no saved or existing installation. If an older install is in the wrong folder, use **Remove** there first, then select the main executable folder in Manual setup.
-3. Run setup to upgrade the game runtime. Installing a new Decky package alone does not change any game. Existing managed installs get a restore point before upgrade. Launch options are merged with existing wrappers and arguments, including your lsfg-vk setup; an unreadable launch-options field must be resolved before automatic replacement.
-4. Choose the explicit **Steam Deck / LSFG experiment** action in Setup. It uses the verified community upscaler, sets `Fsr4ForceEnableInt8=1`, selects the FidelityFX backend, and disables OptiScaler FG (`Enabled=false`, `FGInput=nofg`, `FGOutput=nofg`). The archive is bundled, so this preset can be applied offline. Normal wiki reapply preserves the experiment's FG selection.
-5. In the game, keep **Super Resolution Output Scale = 100%**. Change only the upscaler quality preset. Start with FSR 3.1 input, dynamic resolution off, game FG off and lsfg-vk off. First confirm the game starts and upscaling initializes; then enable your separate lsfg-vk configuration.
+3. Review the wiki requirements shown in Setup. Opening an existing managed 0.9.4 game page automatically upgrades the recognized runtime with the game closed, preserving configuration and taking an immutable restore point first. Fresh or unknown installs use regular Setup. Launch options are merged with existing wrappers and arguments; an unreadable launch-options field must be resolved before automatic replacement.
+4. In **Settings → Basic**, select **FSR 4.1.1b — Steam Deck** to use the bundled community RDNA2 upscaler. The archive is bundled, so it can be applied offline. The wiki setup and Basic preset remain separate choices.
+5. In the game, keep **Super Resolution Output Scale = 100%**. Choose the quality preset and frame-generation settings that suit your setup and the game's wiki guidance.
 
 The setup notes stay visible even without a network connection. This package does not copy NVIDIA DLLs out of the game or edit Engine.ini. The core contains the upstream PBZ extended DLL search and input quirks.
 
@@ -16,22 +16,22 @@ The setup notes stay visible even without a network connection. This package doe
 
 PBZ's directory/version requirements apply to its recognized title, folder alias, or explicitly selected PBZ wiki entry. Renamed non-Steam shortcuts can select that entry manually, but the canonical directory must still contain `PBZ.exe`. A missing executable or wrong Unreal folder blocks setup until corrected; an existing wrong-folder install remains removable.
 
-Other games keep their own wiki plans, install targets and configuration. The community INT8/FG-off experiment is an explicit action for this game, not a global default. Basic's FSR preset remains separate from FG. The shared core upgrade and matching live bridge apply to this plugin build generally; updating the plugin alone does not upgrade every game's installed files.
+Other games keep their own wiki plans, install targets and configuration. The community INT8 preset is selected from Basic settings, independently of the wiki plan. Frame-generation settings remain user-controlled. The shared core upgrade and matching live bridge apply generally. Automatic upgrades run when a managed game page is opened, not across the library during plugin startup.
 
 ## Verify in game
 
 Use a recent Proton build with the VKD3D support required by FSR 4.1. Record the exact SteamOS, Mesa and Proton versions when reporting results; the plugin does not install or change them. The baseline path here is DX12 through Proton, not the experimental Vulkan-with-DX12 interop mode.
 
-The displayed DLL identity and saved settings show **configured**, not **active**. Check `OptiScaler.log` or the OptiScaler overlay for the created FidelityFX upscaler and INT8 model. The file version alone cannot distinguish stock 4.1.1 from patched 4.1.1b, which is why the plugin checks SHA-256. Compare the same scene with all FG off, and only then with lsfg-vk on. Keep base FPS separate from generated/displayed FPS. There is no promised FPS improvement.
+The displayed DLL identity and saved settings show **configured**, not **active**. Check `OptiScaler.log` or the OptiScaler overlay for the created FidelityFX upscaler and INT8 model. The file version alone cannot distinguish stock 4.1.1 from patched 4.1.1b, which is why the plugin checks SHA-256. There is no promised FPS improvement.
 
-The [native live bridge](live-control.md) is pinned to this exact pre5 core. Upgrade each game in Setup with the game closed; updating Decky alone leaves that game’s native module unchanged. Live controls become available only after a matching game session reaches a supported frame callback. The PBZ/LSFG preset keeps OptiScaler FG input/output disabled; enabling a different FG path still requires a restart. Unknown same-name ASIs or unresolved custom plugin paths block an upgrade rather than being silently deleted.
+The [native live bridge](live-control.md) is pinned to this exact pre5 core. The automatic runtime upgrade also installs the matching bridge. Unknown runtimes need review in Setup, with the game closed. Live controls become available only after a matching game session reaches a supported frame callback. Startup settings require a game restart. Unknown same-name ASIs or unresolved custom plugin paths block an upgrade rather than being silently deleted.
 
 ## Restore everything
 
 Close the game before either operation:
 
-- **Restore previous install** restores the immutable pre-experiment snapshot: the previous core, INI bytes/comments, selected community DLL, owned components, original backup inventory, related per-game settings, and the launch options captured at that point. It removes new owned files absent from that snapshot. The restore point remains until Remove, so a failed Steam setter can be retried. After reverting to an old or unknown runtime, the new schema is read-only until you explicitly upgrade again.
-- **Remove** completely removes the managed installation and newly introduced snapshot files, then restores the earliest original game files and the recorded original launch options through the existing removal prompt. Keeping the plugin's launch options is still an explicit choice; select the restore option when you want complete restoration. New experiments never replace the oldest original backups.
+- **Restore previous install** restores the immutable pre-upgrade snapshot: the previous core, INI bytes/comments, selected community DLL, owned components, original backup inventory, related per-game settings, and the launch options captured at that point. It removes new owned files absent from that snapshot. The restore point remains until Remove, so a failed Steam setter can be retried. After an explicit rollback, automatic upgrading is paused for that bundled core and the new schema remains read-only until you manually upgrade. A later bundle with a different core can upgrade again.
+- **Remove** completely removes the managed installation and newly introduced snapshot files, then restores the earliest original game files and the recorded original launch options through the existing removal prompt. Keeping the plugin's launch options is still an explicit choice; select the restore option when you want complete restoration. New setup actions never replace the oldest original backups.
 
 A failed file/configuration commit must leave the pre-operation files and manifest intact; failed operations are not presented as complete. An original INI already lost by an older plugin cannot be reconstructed: the upgrade snapshot protects the INI that actually exists now, and this distinction must not be confused with recovering a file lost before this build was installed. Unrelated game/user files are not part of the restore inventory.
 
@@ -44,4 +44,4 @@ A failed file/configuration commit must leave the pre-operation files and manife
 
 Exact hashes and sizes of every payload input are in `defaults/runtime-manifest.json`. The bridge’s ABI and binary/source identities are recorded in `defaults/live-profile.json` and `defaults/live-build.json`. The source references match the pinned pre5 core; the archived 0.9.4 bridge is rejected.
 
-Community reports describe 0.9.4 freezes and conflicting installation locations, often with FG involved. Those are troubleshooting leads, not Steam Deck validation. The official per-game page takes precedence over those recipes. If the experiment still hangs, restore first and share the game's OptiScaler log plus the precise environment versions; do not stack more undocumented tweaks.
+Community reports describe 0.9.4 freezes and conflicting installation locations. Those are troubleshooting leads, not Steam Deck validation. The official per-game page takes precedence over those recipes. If the game hangs, restore first and share the game's OptiScaler log plus the precise environment versions.

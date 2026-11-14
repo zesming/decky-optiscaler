@@ -1,25 +1,25 @@
-# Decky OptiScaler — PBZ experiment
+# Decky OptiScaler — Phantom Blade Zero
 
-A fork of [Decky OptiScaler](https://github.com/danielcamilo1/decky-optiscaler) for experimenting with **Phantom Blade Zero + FSR 4.1 on Steam Deck**. It manages per-game files, configuration, launch options and restoration from Decky Loader. It is independent of the OptiScaler project.
+A fork of [Decky OptiScaler](https://github.com/danielcamilo1/decky-optiscaler) for **Phantom Blade Zero + FSR 4.1 on Steam Deck**. It manages per-game files, configuration, launch options and restoration from Decky Loader. It is independent of the OptiScaler project.
 
-This experimental package contains:
+This package contains:
 
 - Official **OptiScaler 0.9.5-pre5** core from a fixed upstream build, with the PBZ compatibility fixes.
 - The stable support libraries and a verified community **FSR 4.1.1b INT8 RDNA2 fix** archive for offline setup.
-- A PBZ setup profile for the main `PBZ/platform/steam/PBZ.exe`, with visible 100% output-scale and other manual requirements.
-- An explicit Steam Deck / LSFG experiment which disables OptiScaler FG and leaves lsfg-vk separate.
+- PBZ wiki requirements for the main `PBZ/platform/steam/PBZ.exe`, including 100% output scale.
+- The community FSR 4.1.1b RDNA2 preset in Basic settings.
 - A native live-control bridge pinned to this exact core, with per-game capabilities and confirmed command results.
-- Original-file backups, an upgrade restore point, precise launch-options merging, and Remove support for new experiment files.
+- Original-file backups, an immutable upgrade restore point, precise launch-options merging, rollback, and Remove.
 
-The core and support libraries are a pinned repack, not an upstream full 0.9.5 release. Live control requires the matching core and bridge installed into each game. Saving an INI is separate from submitting a live configuration request; actual runtime state is reported separately, and model/provider and other startup settings still require a restart. Existing old/unknown runtime installs are read-only until explicitly upgraded in Setup. See the [live-control guide](docs/live-control.md) for connection and recovery states. Device evidence is separate from image-quality, performance and long-session claims.
+The core and support libraries are a pinned repack, not an upstream full 0.9.5 release. Live control requires the matching core and bridge installed into each game. Saving an INI is separate from submitting a live configuration request; actual runtime state is reported separately, and model/provider and other startup settings still require a restart. Opening a managed 0.9.4 game automatically upgrades its recognized runtime when the game is closed, preserving its settings and first taking a restore point. Unknown or explicitly restored runtimes remain read-only until reviewed in Setup. See the [live-control guide](docs/live-control.md) for connection and recovery states. Device evidence is separate from image-quality, performance and long-session claims.
 
-See [PBZ setup, verification and complete recovery](docs/phantom-blade-zero.md) before testing. The existing [FSR 4 guide](docs/steam-deck-fsr4.md) explains the stock/community distinction.
+See [PBZ setup, verification and complete recovery](docs/phantom-blade-zero.md). In **Settings → Basic**, select **FSR 4.1.1b — Steam Deck** to use the bundled RDNA2 preset; frame generation remains user-controlled. The [FSR 4 guide](docs/steam-deck-fsr4.md) explains the stock/community distinction.
 
 ## Install and recover
 
-Install the generated zip through Decky Developer mode's **Install Plugin from URL**, or unpack its single `Decky OptiScaler/` directory into `~/homebrew/plugins/` and restart Decky Loader. Then open the game's Setup; updating Decky alone does not upgrade games.
+Install the generated zip through Decky Developer mode's **Install Plugin from URL**, or unpack its single `Decky OptiScaler/` directory into `~/homebrew/plugins/` and restart Decky Loader. Then open the game's page. Recognized managed 0.9.4 installations update automatically; fresh or unknown installations use Setup.
 
-Close the game before installation, upgrade, binary changes, rollback or removal. On an existing managed install, Setup saves a pre-experiment restore point. **Restore previous install** restores that state, including the captured launch options and related per-game preferences. **Remove** restores the earliest original game files and offers the original launch options. Use the restore choice for full removal. Failed Steam writes remain visible and retryable. Originals lost before this build cannot be recreated.
+Close the game before installation, upgrade, binary changes, rollback or removal. Existing managed installs receive an immutable restore point before an upgrade. A running game is deferred until it closes. **Restore previous install** restores that state, including the captured launch options and related per-game preferences; automatic upgrading stays paused for that restored install until the bundled core changes or you upgrade manually. **Remove** restores the earliest original game files and offers the original launch options. Use the restore choice for full removal. Failed Steam writes remain visible and retryable. Originals lost before this build cannot be recreated.
 
 ## Build and validate
 
@@ -42,6 +42,7 @@ HARNESS=live-fields.tsx node testharness/build-and-run.mjs
 HARNESS=use-config.tsx node testharness/build-and-run.mjs
 HARNESS=launch-options.tsx node testharness/build-and-run.mjs
 HARNESS=recovery-ui.tsx node testharness/build-and-run.mjs
+HARNESS=auto-upgrade.tsx node testharness/build-and-run.mjs
 python3 scripts/package.py
 python3 scripts/verify_package.py 'out/Decky OptiScaler.zip'
 ```

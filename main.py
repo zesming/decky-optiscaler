@@ -156,6 +156,10 @@ class Plugin:
                                           game_path=game_path, launch_options=launch_options,
                                           auto_mode=auto_mode)
 
+    async def upgrade_runtime(self, target_dir: str, game_path: str,
+                              launch_options: str = None, name: str = None) -> dict:
+        return await self.service.upgrade_runtime(target_dir, game_path, launch_options, name)
+
     async def get_reframework_status(self, target_dir: str, game_path: str = None,
                                      name: str = None, extra_names: list = None) -> dict:
         return await self.service.get_reframework_status(

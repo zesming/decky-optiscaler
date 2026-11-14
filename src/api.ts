@@ -96,11 +96,10 @@ export const rollbackInstall = callable<
   ActionResult & { launch_options?: string | null }
 >("rollback_install");
 
-/** Apply the PBZ FSR 4.1 INT8 profile; caller must create a restore point first. */
-export const setupDeckExperiment = callable<
-  [targetDir: string, gamePath: string, name?: string],
-  ActionResult & { restart_needed?: boolean }
->("setup_deck_experiment");
+export const upgradeRuntime = callable<
+  [targetDir: string, gamePath: string, launchOptions: string | null, name: string],
+  ActionResult & { upgraded?: boolean; deferred?: boolean; held?: boolean }
+>("upgrade_runtime");
 
 /**
  * What Steam passes a game, read out of its own config file. The fallback for

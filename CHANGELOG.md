@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.8-pbz.3 (experimental)
+
+- Automatically upgrade recognized managed 0.9.4 installs when opened with the game closed, preserving settings and taking a restore point; respect explicit rollback.
+- Keep Setup notes aligned with the wiki, preserve explicit nofg choices, and show the wiki FG path only when frame generation is enabled.
+
 ## 0.0.8-pbz.2 (experimental)
 
 - Adapt the complete native live-control scope to the pinned pre5 core, including backend and dynamic FFX selection.

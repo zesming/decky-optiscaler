@@ -29,6 +29,12 @@
 
 当前 Live 适配补充：原生桥已按固定 pre5 核心重新实现并恢复完整 14 项能力；TS-05 已由真实 Windows/Proton 行为测试补齐。此前“整体禁用 Live”的描述仅记录 pbz.1 历史阶段，不代表 pbz.2。最终 PR 复审覆盖产品、UI、代码和测试，修复及精简结果见该 PR 最新审查评论；当前设备证据见验证记录。
 
+## 追加复核（2026-11-15，pbz.3）
+
+按用户补充要求，通用 Setup 已移除本地 LSFG/关闭 FG 的实验入口和说明，保留 wiki 的 PBZ 目录、版本与 100% 输出要求。Basic 的 wiki FG 建议仅在 FG 开启时展示；自动设置按实际 INI 保留任一侧显式 nofg，不依赖实验偏好。
+
+新增打开游戏页时的受管 0.9.4 自动升级，沿用原安装事务与不可覆盖快照，保留用户配置和启动参数。独立代码与产品/UI 复核发现并关闭身份核对、中断恢复、页面卸载、运行状态竞态、显式回退保护、临时失败重试及误导文案问题；无剩余必须修正项。新增第七个 UI harness，补齐旧 manifest、异步取消与回退/Remove 回归。完整 PR 的既有原生与实机恢复证据继续复用，最终检查结果及设备限制见 PR 验证评论和设备记录。
+
 ## 项目画像
 
 SteamOS/Bazzite 的 Decky 插件，用手柄完成发现游戏、匹配 wiki、部署代理、设置 FSR/可选 FG、监控、卸载恢复。React/TypeScript 前端调用 main.py RPC 与 Python service/installer/wiki/autoplan；live ASI 依赖固定 OptiScaler 内部内存布局。现行捆绑 0.9.4 与旧 schema。测试为 Python 自测、FSR4 生命周期 unittest、三个 jsdom harness；CI 有类型、生成物、构建及打包，没有覆盖率/lint 配置。没有版本内 agent 指令文件；遵循本会话用户给定的工作原则。

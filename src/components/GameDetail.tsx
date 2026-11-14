@@ -10,8 +10,8 @@ import {
 } from "@decky/ui";
 import { toaster } from "@decky/api";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { applyAutoSettings, getGame, rollbackInstall, setAutoMode, setupDeckExperiment } from "../api";
-import { clearTargetLiveActions, forgetTargetLiveRecord } from "../config/liveRecord";
+import { applyAutoSettings, getGame, rollbackInstall, setAutoMode, upgradeRuntime } from "../api";
+import { forgetTargetLiveRecord } from "../config/liveRecord";
 import { invalidateTargetReads, serializeTargetWrite } from "../config/writeRecord";
 import { TABS, optionsInSection } from "../config/tabs";
 import { AUTO } from "../config/values";
@@ -25,7 +25,7 @@ import { useAutoPlan } from "../hooks/useAutoPlan";
 import { useConfig } from "../hooks/useConfig";
 import { restartGame, setLaunchOptions } from "../hooks/useRunningGame";
 import { useLiveStatus } from "../hooks/useLiveStatus";
-import { preserveExistingInstall } from "../launchOptions";
+import { currentLaunchOptions } from "../launchOptions";
 import type {
   GameDetail as GameDetailData,
   LiveApplyResult,
@@ -155,7 +155,16 @@ export function GameDetail({
   const [restoreBusy, setRestoreBusy] = useState(false);
   const [restoreSteam, setRestoreSteam] = useState<{ appid: string; value: string } | null>(null);
   const [restoreError, setRestoreError] = useState<string | null>(null);
-  const [experimentBusy, setExperimentBusy] = useState(false);
+  const [upgradingTarget, setUpgradingTarget] = useState<string | null>(null);
+  const [upgradeDeferred, setUpgradeDeferred] = useState(false);
+  const [upgradeError, setUpgradeError] = useState<{ target: string; message: string } | null>(null);
+  const upgradeInFlight = useRef(false);
+  const runtimeUpgradeAttempts = useRef(new Set<string>());
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const selectionKey = `${gamePath}\u0000${gameName}\u0000${appid ?? ""}`;
   const selectionKeyRef = useRef(selectionKey);
   selectionKeyRef.current = selectionKey;
@@ -206,7 +215,16 @@ export function GameDetail({
     await config.flush();
     if (targetDir) invalidateTargetReads(targetDir);
   };
-  const { status: liveStatus, statusEpoch: liveStatusEpoch, refresh: refreshLive } = useLiveStatus(targetDir, isRunning);
+  const upgradeKey = `${targetDir ?? ""}\u0000${status?.version ?? ""}`;
+  const autoUpgradeCandidate = Boolean(
+    detail?.install.managed && detail.install.runtime_current === false &&
+    (detail.install.runtime_recovery_needed || !detail.install.runtime_upgrade_held) && !runtimeUpgradeAttempts.current.has(upgradeKey) &&
+    !pbzTargetMismatch(detail, hasPbzIdentity(detail), targetDir ?? detail.target),
+  );
+  const { status: liveStatus, statusEpoch: liveStatusEpoch, refresh: refreshLive } = useLiveStatus(
+    targetDir, isRunning || autoUpgradeCandidate,
+  );
+  const upgradeRunning = isRunning || Boolean(liveStatus?.attached || liveStatus?.legacy_running);
   useEffect(() => config.reconcileLiveStatus(liveStatus, liveStatusEpoch), [
     config.reconcileLiveStatus, liveStatus, liveStatusEpoch, config.livePending,
   ]);
@@ -298,6 +316,48 @@ export function GameDetail({
   } = useAutoPlan(gamePath, gameName);
   const requiredTargetMismatch = detail && pbzTargetMismatch(detail,
     Boolean(plan?.required_target) || hasPbzIdentity(detail), targetDir ?? detail.target);
+
+  useEffect(() => {
+    if (!autoUpgradeCandidate || !targetDir || !liveStatus || upgradeRunning || requiredTargetMismatch || upgradeInFlight.current) return;
+    const target = targetDir;
+    const requestedKey = selectionKey;
+    upgradeInFlight.current = true;
+    setUpgradingTarget(target);
+    setUpgradeError(null);
+    void (async () => {
+      try {
+        const launch = await currentLaunchOptions(appid);
+        if (appid && launch === null) throw new Error("Steam launch options are unavailable. Reopen this page to retry.");
+        const result = await serializeTargetWrite(target, () =>
+          mounted.current && selectionKeyRef.current === requestedKey
+            ? upgradeRuntime(target, gamePath, launch, gameName)
+            : Promise.resolve(null),
+        );
+        if (!result) return;
+        if (result.deferred) {
+          if (mounted.current) setUpgradeDeferred(true);
+          return;
+        }
+        if (mounted.current) setUpgradeDeferred(false);
+        runtimeUpgradeAttempts.current.add(upgradeKey);
+        if (!result.ok) throw new Error(result.error ?? "Automatic runtime update failed.");
+        if (!mounted.current || selectionKeyRef.current !== requestedKey) return;
+        if (result.upgraded) forgetTargetLiveRecord(target);
+        invalidateTargetReads(target);
+        await Promise.all([load(), config.authoritativeReload(), refreshLive()]);
+        void reloadPlan(false);
+      } catch (exc) {
+        runtimeUpgradeAttempts.current.add(upgradeKey);
+        if (mounted.current && selectionKeyRef.current === requestedKey) {
+          setUpgradeError({ target, message: String(exc) });
+        }
+      } finally {
+        upgradeInFlight.current = false;
+        if (mounted.current) setUpgradingTarget((current) => current === target ? null : current);
+      }
+    })();
+  }, [autoUpgradeCandidate, targetDir, upgradeRunning, requiredTargetMismatch, selectionKey,
+    upgradeKey, appid, gamePath, gameName, liveStatusEpoch, load, config.authoritativeReload, refreshLive, reloadPlan]);
 
   /**
    * Switching automatic on re-applies the wiki's settings; switching it off
@@ -415,36 +475,6 @@ export function GameDetail({
     }
   };
 
-  const runDeckExperiment = async () => {
-    if (
-      !detail?.install.installed || !targetDir || experimentBusy || !runtimeCurrent ||
-      isRunning
-    ) return;
-    setExperimentBusy(true);
-    try {
-      await config.flush();
-      invalidateTargetReads(targetDir);
-      const snapshot = await preserveExistingInstall(targetDir, gamePath, appid);
-      if (!snapshot.ok) throw new Error(snapshot.error ?? "Could not preserve the current install.");
-      const result = await serializeTargetWrite(targetDir, () =>
-        setupDeckExperiment(targetDir, gamePath, gameName),
-      );
-      invalidateTargetReads(targetDir);
-      if (!result.ok) throw new Error(result.error ?? "Could not set up the PBZ experiment.");
-      await config.authoritativeReload();
-      clearTargetLiveActions(targetDir);
-      await load();
-      toaster.toast({
-        title: "PBZ FSR 4.1 experiment is ready",
-        body: "Restart the game. In its graphics settings, set Super Resolution Output Scale to 100% and turn frame generation off.",
-      });
-    } catch (exc) {
-      toaster.toast({ title: "PBZ experiment failed", body: String(exc) });
-    } finally {
-      setExperimentBusy(false);
-    }
-  };
-
   // Land on the settings tab once a game is set up; Setup is only interesting
   // before that, or when changing the install.
   useEffect(() => {
@@ -461,6 +491,7 @@ export function GameDetail({
   const isThisGameRunning = isRunning;
 
   if (loading && !detail) return <Centered>Reading game folder…</Centered>;
+  if (targetDir && upgradingTarget === targetDir && !upgradeDeferred) return <Centered>Updating OptiScaler…</Centered>;
   if (!detail) {
     return (
       <Centered>
@@ -562,8 +593,6 @@ export function GameDetail({
               restoreBusy={restoreBusy}
               restoreError={restoreError}
               onRetryRestoreLaunchOptions={retryRestoreLaunchOptions}
-              onDeckExperiment={runDeckExperiment}
-              experimentBusy={experimentBusy}
               onResetConfig={async () => {
                 await config.authoritativeReload();
               }}
@@ -726,7 +755,7 @@ export function GameDetail({
       {liveBanner}
       {restartBanner}
 
-      {installed && !runtimeCurrent ? (
+      {installed && detail.install.runtime_current === false ? (
         <div
           style={{
             margin: "0 12px 4px",
@@ -738,8 +767,12 @@ export function GameDetail({
             flexShrink: 0,
           }}
         >
-          This install uses an older OptiScaler runtime. Settings are read-only until you upgrade
-          it in Setup.
+          {upgradeError?.target === targetDir ? upgradeError.message :
+            detail.install.runtime_upgrade_held
+              ? "Previous install restored. Upgrade manually in Setup when ready."
+              : autoUpgradeCandidate && (upgradeRunning || upgradeDeferred)
+                ? "Waiting for the game to close before checking the runtime update."
+                : "This runtime needs review in Manual setup before settings can be edited."}
         </div>
       ) : null}
 

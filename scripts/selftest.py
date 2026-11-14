@@ -1358,6 +1358,10 @@ def check_auto_plan():
         base.update(recommendation)
         return autoplan.build(base)
 
+    method_settings = plan_for(detail={"Settings": "[FrameGen] FGInput=dlssg, FGOutput=fsrfg"})
+    check("explicit wiki FG method stays outside ordinary automatic settings",
+          not any(item["section"] == "FrameGen" and item["key"] in ("FGInput", "FGOutput")
+                  for item in method_settings["settings"]))
     check("no match means no plan", not autoplan.build({"matched": False})["available"])
     check("no recommendation at all is survivable", not autoplan.build(None)["available"])
 

@@ -308,7 +308,8 @@ with installer.target_transaction(target, require_stopped=True):
         with patch.object(self.service.settings, 'restore_game') as restore_game:
             result = asyncio.run(self.service.uninstall(str(self.game)))
         self.assertTrue(result['ok'], result)
-        restore_game.assert_called_once_with(game_path, original_settings)
+        restore_game.assert_called_once_with(game_path, original_settings,
+            runtime_hold=('runtime-upgrade-hold:' + str(self.game.resolve()), None))
 
     def test_service_install_checks_game_identity_after_transaction_recovery(self):
         self.install()
@@ -716,6 +717,179 @@ with installer.target_transaction(target, require_stopped=True):
         rolled = asyncio.run(self.service.rollback_install(str(self.game), '/games/PBZ'))
         self.assertTrue(rolled['ok'], rolled)
         self.assertEqual((self.game / 'dxgi.dll').read_bytes(), legacy)
+
+    def prepare_auto_upgrade(self):
+        self.install(filename='winmm.dll')
+        old = installer.DLL_MARKER + b'old 0.9.4 core' + b'\0' * installer.MIN_OPTISCALER_SIZE
+        (self.game / 'winmm.dll').write_bytes(old)
+        ini = b'; keep my comments\n[Plugins]\nLoadAsiPlugins=false\n[FSR]\nFsr4ForceEnableInt8=true\n[FrameGen]\nEnabled=false\nFGInput=nofg\nFGOutput=nofg\n'
+        (self.game / constants.INI_NAME).write_bytes(ini)
+        (self.game / 'fakenvapi.ini').write_bytes(b'; keep helper settings\n[Custom]\nValue=user\n')
+        manifest = installer.read_manifest(self.game)
+        manifest.update(optiscaler_version='0.9.4', game_path=str(self.game), optipatcher=True)
+        (self.game / constants.MANIFEST_NAME).write_text(json.dumps(manifest))
+        self.service.settings.configure_game(str(self.game), str(self.game), True)
+        pin = patch.object(constants, 'UPGRADE_RUNTIME_HASHES', {'0.9.4': hashlib.sha256(old).hexdigest()})
+        pin.start(); self.addCleanup(pin.stop)
+        return old
+
+    def test_automatic_upgrade_preserves_configuration_and_rollback_holds_the_version(self):
+        old = self.prepare_auto_upgrade()
+        before = tree(self.game)
+        prefs = self.service.settings.snapshot_game(str(self.game))
+        result = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.game), 'wrapper %command%'))
+        self.assertTrue(result['ok'], result); self.assertTrue(result['upgraded'])
+        self.assertTrue(installer.runtime_current(self.game))
+        self.assertEqual(installer.read_manifest(self.game)['filename'], 'winmm.dll')
+        self.assertFalse((self.game / 'plugins/OptiPatcher.asi').exists(), 'removed OptiPatcher must stay removed')
+        self.assertEqual((self.game / 'fakenvapi.ini').read_bytes(), before['fakenvapi.ini'])
+        ini = IniFile(self.game / constants.INI_NAME)
+        self.assertEqual(ini.get('Plugins', 'LoadAsiPlugins'), 'false')
+        self.assertEqual(ini.get('FSR', 'Fsr4ForceEnableInt8'), '1')
+        self.assertEqual(ini.get('FrameGen', 'FGInput'), 'nofg')
+        self.assertIn('; keep my comments', (self.game / constants.INI_NAME).read_text())
+        self.assertEqual(self.service.settings.snapshot_game(str(self.game)), prefs)
+        point = restorepoint.info(self.game)
+        self.assertEqual(point['metadata']['launch_options'], 'wrapper %command%')
+        rolled = asyncio.run(self.service.rollback_install(str(self.game), str(self.game)))
+        self.assertTrue(rolled['ok'], rolled)
+        self.assertEqual(tree(self.game), before)
+        self.assertEqual((self.game / 'winmm.dll').read_bytes(), old)
+        restarted = OptiScalerService(ROOT, self.root / 'settings', self.root / 'runtime',
+                                     self.root / 'home', logging.getLogger('auto-upgrade-restart'))
+        restarted.ensure_payload = AsyncMock(return_value=str(self.source))
+        held = asyncio.run(restarted.upgrade_runtime(str(self.game), str(self.game)))
+        self.assertTrue(held['ok'] and held['held'], held)
+        self.assertEqual(tree(self.game), before)
+        manual = asyncio.run(restarted.install(str(self.game), filename='winmm.dll', game_path=str(self.game)))
+        self.assertTrue(manual['ok'], manual)
+        self.assertFalse(restarted.settings.get_pref('runtime-upgrade-hold:' + str(self.game.resolve())))
+
+    def test_automatic_upgrade_is_idempotent_and_defers_a_running_game(self):
+        self.install()
+        before = tree(self.game)
+        current = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.game)))
+        self.assertTrue(current['ok'], current); self.assertFalse(current['upgraded'])
+        self.assertEqual(tree(self.game), before)
+        with patch.object(installer, 'require_stopped_target', side_effect=installer.GameRunningError('game running')):
+            running = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.game)))
+        self.assertTrue(running['deferred'], running)
+        self.assertEqual(tree(self.game), before)
+        self.assertFalse((self.game / restorepoint.RESTORE_DIR).exists())
+
+    def test_automatic_upgrade_refuses_unknown_core_or_cross_game_identity_without_writes(self):
+        self.prepare_auto_upgrade()
+        before = tree(self.game)
+        other = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.root / 'other')))
+        self.assertFalse(other['ok'], other); self.assertEqual(tree(self.game), before)
+        (self.game / 'winmm.dll').write_bytes(b'a game update replaced the proxy')
+        changed = tree(self.game)
+        unknown = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.game)))
+        self.assertFalse(unknown['ok'], unknown); self.assertEqual(tree(self.game), changed)
+        self.assertFalse((self.game / restorepoint.RESTORE_DIR).exists())
+
+    def test_automatic_upgrade_accepts_legacy_manifest_but_checks_saved_target_and_snapshot(self):
+        self.prepare_auto_upgrade()
+        manifest = installer.read_manifest(self.game)
+        manifest.pop('game_path')  # Actual 0.9.4-era manifests predate this identity.
+        (self.game / constants.MANIFEST_NAME).write_text(json.dumps(manifest))
+        before = tree(self.game)
+        self.service.settings.set_target(str(self.game), str(self.root / 'wrong'))
+        wrong = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.game)))
+        self.assertFalse(wrong['ok'], wrong); self.assertEqual(tree(self.game), before)
+        self.service.settings.set_target(str(self.game), str(self.game))
+        restorepoint.create(self.game, {'game_path': '/different-game',
+            'game_settings': self.service.settings.snapshot_game(str(self.game)), 'launch_options': None})
+        conflict = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.game)))
+        self.assertFalse(conflict['ok'], conflict); self.assertEqual(tree(self.game), before)
+        shutil.rmtree(self.game / restorepoint.RESTORE_DIR)
+        accepted = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.game)))
+        self.assertTrue(accepted['ok'] and accepted['upgraded'], accepted)
+        self.assertEqual(installer.read_manifest(self.game)['game_path'], str(self.game))
+        prefs = self.service.settings.snapshot_game(str(self.game))
+        removed = asyncio.run(self.service.uninstall(str(self.game)))
+        self.assertTrue(removed['ok'], removed)
+        self.assertEqual(self.service.settings.snapshot_game(str(self.game)), prefs)
+        self.assertFalse((self.game / restorepoint.RESTORE_DIR).exists())
+
+    def test_automatic_upgrade_refuses_known_pbz_without_main_executable(self):
+        self.prepare_auto_upgrade()
+        before = tree(self.game)
+        result = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.game), name='Phantom Blade Zero'))
+        self.assertFalse(result['ok'], result); self.assertEqual(tree(self.game), before)
+        self.assertFalse((self.game / restorepoint.RESTORE_DIR).exists())
+
+    def test_automatic_upgrade_recovers_interrupted_new_core_before_reporting_current(self):
+        old = self.prepare_auto_upgrade()
+        code = """import os,sys,shutil
+sys.path.insert(0, sys.argv[1])
+from optiscaler import installer
+with installer.target_transaction(sys.argv[2], require_stopped=True):
+ shutil.copyfile(sys.argv[3], sys.argv[2] + '/winmm.dll')
+ os._exit(73)
+"""
+        crashed = subprocess.run([sys.executable, '-c', code, str(ROOT / 'py_modules'),
+            str(self.game), str(self.source / 'OptiScaler.dll')], capture_output=True)
+        self.assertEqual(crashed.returncode, 73, crashed.stderr.decode())
+        self.assertFalse(installer.runtime_current(self.game), 'pending recovery must keep config read-only')
+        self.assertEqual((self.game / 'winmm.dll').read_bytes(), (self.source / 'OptiScaler.dll').read_bytes())
+        result = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.game)))
+        self.assertTrue(result['ok'] and result['upgraded'], result)
+        self.assertTrue(installer.runtime_current(self.game))
+        self.assertFalse(installer.pending_target_transaction(self.game))
+        rolled = asyncio.run(self.service.rollback_install(str(self.game), str(self.game)))
+        self.assertTrue(rolled['ok'], rolled)
+        self.assertEqual((self.game / 'winmm.dll').read_bytes(), old)
+
+    def test_current_runtime_is_not_locked_by_normal_ini_save_or_journal_cleanup(self):
+        self.install()
+        # A reader runs on another worker, outside the transaction's thread-local state.
+        import concurrent.futures
+        def read_current():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(installer.runtime_current, self.game).result()
+        with installer.target_transaction(self.game, include_known=False,
+                extra_names=(constants.INI_NAME, constants.MANIFEST_NAME),
+                intent=installer.TRANSACTION_INTENT_MANAGED_INI):
+            self.assertTrue(read_current())
+        for prefix in (installer.TRANSACTION_PREPARING_PREFIX, installer.TRANSACTION_RETIRING_PREFIX):
+            path = self.game / (prefix + 'test')
+            path.mkdir()
+            self.assertTrue(read_current())
+            path.rmdir()
+
+    def test_automatic_upgrade_defers_when_game_starts_during_snapshot_and_retries(self):
+        self.prepare_auto_upgrade()
+        before = tree(self.game)
+        stopped = installer.require_stopped_target
+        checks = 0
+        def starts_during_snapshot(target):
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                raise installer.GameRunningError('game started during upgrade')
+            return stopped(target)
+        with patch.object(installer, 'require_stopped_target', side_effect=starts_during_snapshot):
+            deferred = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.game)))
+        self.assertTrue(deferred['ok'] and deferred['deferred'], deferred)
+        self.assertEqual(tree(self.game), before)
+        result = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.game)))
+        self.assertTrue(result['ok'] and result['upgraded'], result)
+
+    def test_automatic_upgrade_failure_keeps_the_old_install_and_snapshot(self):
+        self.prepare_auto_upgrade()
+        before = tree(self.game); prefs = self.service.settings.snapshot_game(str(self.game))
+        copy = installer.atomic_copy
+        def fail_core(source, destination, **kwargs):
+            if Path(destination).resolve() == (self.game / 'winmm.dll').resolve():
+                raise OSError('injected upgrade copy failure')
+            return copy(source, destination, **kwargs)
+        with patch.object(installer, 'atomic_copy', side_effect=fail_core):
+            result = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.game)))
+        self.assertFalse(result['ok'], result)
+        self.assertEqual(tree(self.game), before)
+        self.assertEqual(self.service.settings.snapshot_game(str(self.game)), prefs)
+        self.assertTrue(restorepoint.info(self.game)['available'])
 
     def test_interrupted_transaction_recovers_after_process_restart(self):
         ini = self.game / constants.INI_NAME
@@ -1319,14 +1493,15 @@ with installer.target_transaction(target, require_stopped=True):
         self.assertEqual((self.game / 'dxgi.dll').read_bytes(), b'oldest legacy original')
         self.assertFalse(legacy.exists())
 
-    def test_waiting_automatic_operations_observe_committed_experiment_mode(self):
+    def test_waiting_automatic_operations_preserve_committed_nofg_without_experiment_mode(self):
         self.install()
         game = '/games/serialized'
         async def verify():
-            for operation in ('apply', 'install'):
+            for operation, fg_input, fg_output in (('apply', 'nofg', 'nofg'),
+                    ('install', 'nofg', 'nofg'), ('apply', 'nofg', 'fsrfg'), ('install', 'dlssg', 'nofg')):
                 self.service.settings.set_pref('deck-experiment:' + game, False)
                 ini = IniFile(self.game / constants.INI_NAME)
-                ini.set('FrameGen', 'FGInput', 'nofg'); ini.set('FrameGen', 'FGOutput', 'nofg'); ini.save()
+                ini.set('FrameGen', 'FGInput', 'auto'); ini.set('FrameGen', 'FGOutput', 'auto'); ini.save()
                 planned = asyncio.Event()
                 async def plan(*args):
                     planned.set()
@@ -1340,14 +1515,14 @@ with installer.target_transaction(target, require_stopped=True):
                     task = asyncio.create_task(coro)
                     await planned.wait()
                     await asyncio.sleep(0)
-                    self.service.settings.set_pref('deck-experiment:' + game, True)
+                    ini.set('FrameGen', 'FGInput', fg_input); ini.set('FrameGen', 'FGOutput', fg_output); ini.save()
                 finally:
                     self.service._mutation_lock.release()
                 result = await task
                 self.assertTrue(result['ok'], result)
                 values = IniFile(self.game / constants.INI_NAME)
-                self.assertEqual(values.get('FrameGen', 'FGInput'), 'nofg', operation)
-                self.assertEqual(values.get('FrameGen', 'FGOutput'), 'nofg', operation)
+                self.assertEqual(values.get('FrameGen', 'FGInput'), fg_input, operation)
+                self.assertEqual(values.get('FrameGen', 'FGOutput'), fg_output, operation)
         asyncio.run(verify())
 
     def test_interrupted_committed_journal_cleanup_never_blocks_next_operation(self):
@@ -1692,7 +1867,13 @@ with installer.target_transaction(sys.argv[2],include_known=False):
         recommendation = gameprofiles.recommendation({'matched': False}, '影之刃零')
         plan = gameprofiles.constrain({}, recommendation)
         self.assertTrue(plan['runtime_supported'])
+        self.assertEqual(len(plan['manual_steps']), 2)
         self.assertTrue(any('100%' in step for step in plan['manual_steps']))
+        self.assertTrue(any('PBZ/platform/steam' in step for step in plan['manual_steps']))
+        notes = ' '.join(plan['manual_steps']).lower()
+        self.assertNotIn('lsfg', notes)
+        self.assertNotIn('experiment', notes)
+        self.assertNotIn('frame generation off', notes)
         with patch.object(gameprofiles, 'OPTISCALER_VERSION', '0.9.4'):
             self.assertFalse(gameprofiles.constrain({}, recommendation)['runtime_supported'])
 

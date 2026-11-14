@@ -130,6 +130,7 @@ class Settings:
             targets = dict(self._data.get("game_targets", {}))
             prefs = dict(self._data.get("prefs", {}))
             targets[str(game_path)] = str(target_dir)
+            prefs.pop(f"runtime-upgrade-hold:{Path(target_dir).resolve()}", None)
             key = f"auto_mode:{game_path}"
             if auto_mode:
                 prefs[key] = True
@@ -149,11 +150,17 @@ class Settings:
                 "experiment": prefs.get(f"deck-experiment:{game_path}"),
             }
 
-    def restore_game(self, game_path, snapshot):
+    def restore_game(self, game_path, snapshot, *, runtime_hold=None):
         with self._lock:
             before = self._data
             targets = dict(before.get("game_targets", {}))
             prefs = dict(before.get("prefs", {}))
+            if runtime_hold is not None:
+                key, value = runtime_hold
+                if value is None:
+                    prefs.pop(key, None)
+                else:
+                    prefs[key] = value
             if snapshot.get("target") is None:
                 targets.pop(str(game_path), None)
             else:

@@ -694,17 +694,12 @@ export function BasicPanel({
    */
   const methodControls = (
     <>
-      {/* The method is offered in automatic mode too. The wiki's pair is the
-          better *starting* answer — it is what the game can actually feed —
-          but which generator to run is as much the user's call as the
-          upscaler is, so it is a recommendation printed under the control
-          rather than the control's replacement. */}
       <PanelSectionRow>
         <ValueDropdown
           label="Method"
           description={hint(fgPreset?.description ?? "Choose which frame generator to use.")}
           disabled={busy || !fgOn}
-          bottomSeparator={automatic && plannedFg ? "none" : "standard"}
+          bottomSeparator={automatic && fgOn && plannedFg ? "none" : "standard"}
           options={FG_PRESETS.map((preset) => ({ data: preset.id, label: preset.label }))}
           // A wiki plan writes the pair the entry names, which is a stronger
           // statement than any preset and need not be one of them.
@@ -722,10 +717,10 @@ export function BasicPanel({
         />
       </PanelSectionRow>
 
-      {automatic && plannedFg ? (
+      {automatic && fgOn && plannedFg ? (
         <PanelSectionRow>
           <div style={{ padding: "0 0 8px", fontSize: "12px", opacity: 0.85 }}>
-            The wiki recommends{" "}
+            Wiki FG path: {" "}
             <strong>
               {plannedFg.input === "nofg"
                 ? "no frame generation"
@@ -785,20 +780,11 @@ export function BasicPanel({
                         </Mono>
                       </span>
                     ))}
-                    {plannedFg && plannedFg.input !== "nofg" ? (
-                      <>
-                        , and frame generation through {plannedFg.input_label} →{" "}
-                        {plannedFg.output_label}
-                      </>
-                    ) : null}
                     . Turn this off to get every option back.
                   </>
                 ) : (
                   <>
                     This entry needs no special OptiScaler settings
-                    {plannedFg && plannedFg.input !== "nofg"
-                      ? ` beyond frame generation through ${plannedFg.input_label} → ${plannedFg.output_label}`
-                      : ""}
                     . Turn this off to get every option back.
                   </>
                 )}

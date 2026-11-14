@@ -4,7 +4,7 @@ Package `0.0.8-pbz.2` uses the pinned OptiScaler `0.9.5-pre5` core and community
 
 ## Environment and deployment
 
-Steam Deck OLED 1 TB, SteamOS 3.9.5, Decky Loader 3.3.1, Proton Experimental and Mesa 26.1.2. These were inspected, not upgraded. The same named plugin was replaced through Decky's normal install API; LSFG-VK and other plugins were preserved. Other games' installed files were not upgraded.
+Steam Deck OLED 1 TB, SteamOS 3.9.5, Decky Loader 3.3.1, Proton Experimental and Mesa 26.1.2. These were inspected, not upgraded. The same named plugin was replaced through Decky's normal install API; LSFG-VK and other plugins were preserved. Other games' installed files were not upgraded during that gameplay/recovery run.
 
 The game target is the main `PBZ.exe` directory at `PBZ/platform/steam`. The original plugin/settings, current Steam launch value, relevant game configuration and original game-file hashes are backed up privately. The plugin does not edit external game graphics settings or save progress.
 
@@ -17,11 +17,21 @@ The game target is the main `PBZ.exe` directory at `PBZ/platform/steam`. The ori
 
 Synthetic tests are separate from actual game observations. They do not prove GPU effect for every option or hardware/API combination.
 
+## Follow-up: automatic runtime upgrades
+
+Package `0.0.8-pbz.3` removes the dedicated experiment UI and adds runtime upgrades when an old managed game page is opened. Recognized 0.9.4 proxy hashes are upgraded through the existing transaction, with an immutable restore point first. INI comments and values, the proxy filename, optional components, per-game preferences and launch options are preserved. Legacy boolean INT8 values migrate to the current model number.
+
+Regression checks cover legacy manifests, conflicting game/snapshot identities, interrupted binary upgrades, a game starting during preflight, explicit rollback holds, Remove, cross-thread INI saves, and explicit nofg choices without a private experiment preference. A dedicated seventh UI harness covers post-upgrade editing, running/deferred states, held versions, retry on reopening, and leaving the page during a Steam launch-options read.
+
+The physical gameplay and recovery evidence below is from `pbz.2`; the core and native bridge are unchanged in `pbz.3`. Device deployment and old-game automatic upgrade verification remain pending while the device is unreachable.
+
 ## Real-game live control
 
 The game reached its main menu and continued into gameplay. The native module reported schema 7, the pinned core identity, verified physical game directory and a ready DX12 callback. The bridge identified the `fsr31` backend and exposed the available `4.1.1b`, `3.1.5` and `2.3.4` FFX list.
 
 Real RPC requests for Show FPS, sharpness override/value and FFX index 0 returned matching `config_request_accepted` receipts. A backend request to `fsr21` was followed by an independent runtime observation of `fsr21`; switching back was followed by `fsr31`. Rendering continued. Test settings were restored afterwards.
+
+A follow-up check temporarily enabled the FSR watermark and entered an actual gameplay scene. The rendered frame displayed **`FSR4-I8 UPSCALE 4.1.1B`**, directly identifying the running INT8 upscaler. The game was then closed and the watermark setting restored to its original `auto`; all configuration values matched the pre-check values. Raw screenshots remain private.
 
 The receipt confirms OptiScaler accepted the configuration request, not that a new backend or FG output has already reached the GPU. Runtime backend, FG state and telemetry are separate observations; actual FFX index remains unknown. PBZ's configured `nofg` path intentionally exposes no OptiScaler FG controls, so FG GPU behavior was not exercised on this game. The complete field scope is covered by native and RPC tests instead of enabling FG alongside the user's LSFG setup.
 

@@ -128,6 +128,9 @@ export interface InstallInfo {
   launch_record: LaunchRecord;
   /** True only when the installed OptiScaler proxy matches this plugin's pinned runtime hash. */
   runtime_current?: boolean;
+  /** Explicit rollback retains the old install for this bundled runtime. */
+  runtime_upgrade_held?: boolean;
+  runtime_recovery_needed?: boolean;
   /** A preserved pre-upgrade snapshot that can still be restored. */
   rollback?: {
     available: boolean;

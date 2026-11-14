@@ -275,3 +275,7 @@ LIVE_BUILD_FILE = "live-build.json"
 LIVE_OPTISCALER_VERSION = "0.9.4"
 LEGACY_LIVE_ASI_SHA256 = "ca4db054e42864a4bf754a18dc6288e7b9be888e24d119916ddedaef3c5de207"
 RUNTIME_DLL_SHA256 = LIVE_CORE_SHA256
+# Core from the former pinned 0.9.4 support archive (SHA-256 575cb4df…ef0ad).
+UPGRADE_RUNTIME_HASHES = {
+    "0.9.4": "fbfb6676b829dad7e020fb830586a16aa0ec6add78016db48ef12e2ae1803231",
+}

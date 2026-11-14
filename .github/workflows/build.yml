@@ -92,6 +92,7 @@ jobs:
           HARNESS=use-config.tsx node testharness/build-and-run.mjs
           HARNESS=launch-options.tsx node testharness/build-and-run.mjs
           HARNESS=recovery-ui.tsx node testharness/build-and-run.mjs
+          HARNESS=auto-upgrade.tsx node testharness/build-and-run.mjs
 
       - name: Package
         run: python3 scripts/package.py

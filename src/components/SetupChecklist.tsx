@@ -90,8 +90,6 @@ interface Props {
   restoreBusy?: boolean;
   restoreError?: string | null;
   onRetryRestoreLaunchOptions?: () => void;
-  onDeckExperiment?: () => Promise<void> | void;
-  experimentBusy?: boolean;
 }
 
 interface RemoveRetry {
@@ -211,12 +209,7 @@ function WikiTrouble({
 
 /** What the wiki asks to be written, as one readable line. */
 function settingsSummary(plan: AutoPlan) {
-  const pairs = plan.settings.map((item) => `${item.key}=${item.value}`);
-  const fg =
-    plan.framegen && plan.framegen.input !== "nofg"
-      ? `frame generation through ${plan.framegen.input_label} → ${plan.framegen.output_label}`
-      : null;
-  return [pairs.join(", "), fg].filter(Boolean).join(", plus ");
+  return plan.settings.map((item) => `${item.key}=${item.value}`).join(", ");
 }
 
 const PBZ_PLAN_NAMES = new Set(["pbz", "phantom blade zero", "影之刃零"]);
@@ -446,8 +439,6 @@ export function SetupChecklist({
   restoreBusy = false,
   restoreError,
   onRetryRestoreLaunchOptions,
-  onDeckExperiment,
-  experimentBusy = false,
 }: Readonly<Props>) {
   const installed = Boolean(detail.install.installed);
   const planned = plan?.available ? plan : null;
@@ -1139,7 +1130,7 @@ export function SetupChecklist({
                   {installed
                     ? <>OptiScaler is currently in <Mono>{shorten(detail.install.path)}</Mono>, but this game needs <Mono>{expectedPbzTarget ? shorten(expectedPbzTarget) : requiredTarget}</Mono>. Remove the current install first, then choose the folder containing the main <Mono>PBZ.exe</Mono> in Manual setup.</>
                     : <>{detail.target_is_saved ? "The saved folder" : "The selected folder"} is <Mono>{shorten(detail.target)}</Mono>, but this game needs <Mono>{expectedPbzTarget ? shorten(expectedPbzTarget) : requiredTarget}</Mono>. Open Manual setup and choose the folder containing the main <Mono>PBZ.exe</Mono>.</>}
-                  Automatic setup, launch changes, and the PBZ experiment are paused until the folder matches.
+                  Automatic setup and launch changes are paused until the folder matches.
                 </Notice>
               </PanelSectionRow>
             ) : null}
@@ -1336,7 +1327,7 @@ export function SetupChecklist({
         {requiredTargetMismatch && requiredTarget ? (
           <PanelSectionRow>
             <Notice tone="error" title="This install is in the wrong game folder">
-              OptiScaler is in <Mono>{shorten(detail.install.path)}</Mono>, but Phantom Blade Zero needs <Mono>{expectedPbzTarget ? shorten(expectedPbzTarget) : requiredTarget}</Mono>. Remove this install first, then choose the folder containing the main <Mono>PBZ.exe</Mono> in Manual setup. Automatic settings, launch changes, and the experiment are paused until then.
+              OptiScaler is in <Mono>{shorten(detail.install.path)}</Mono>, but Phantom Blade Zero needs <Mono>{expectedPbzTarget ? shorten(expectedPbzTarget) : requiredTarget}</Mono>. Remove this install first, then choose the folder containing the main <Mono>PBZ.exe</Mono> in Manual setup. Automatic settings and launch changes are paused until then.
             </Notice>
           </PanelSectionRow>
         ) : null}
@@ -1601,34 +1592,6 @@ export function SetupChecklist({
             <PanelSectionRow>
               <Notice tone="warn">Close the game before restoring files.</Notice>
             </PanelSectionRow>
-          ) : null}
-        </PanelSection>
-      ) : null}
-
-      {planned && isPbzPlan(planned) && runtimeCurrent && onDeckExperiment && !requiredTargetMismatch ? (
-        <PanelSection title="Phantom Blade Zero experiment">
-          <PanelSectionRow>
-            <Notice tone="info" title="Bundled FSR 4.1 INT8 profile">
-              This offline action preserves the current install first, then selects the community
-              FSR 4.1 INT8 preset and turns OptiScaler frame generation off. After restart, keep
-              the game's Super Resolution Output Scale at 100% and leave frame generation off
-              in the game when using LSFG.
-            </Notice>
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <Focusable style={{ display: "flex" }}>
-              <DialogButton
-                disabled={busy || experimentBusy || running || requiredTargetMismatch}
-                onClick={() => void onDeckExperiment()}
-                onOKActionDescription="Apply the reversible Phantom Blade Zero FSR 4.1 experiment"
-                style={{ flexGrow: 1 }}
-              >
-                {experimentBusy ? "Preparing experiment…" : "Set up the FSR 4.1 experiment"}
-              </DialogButton>
-            </Focusable>
-          </PanelSectionRow>
-          {running ? (
-            <PanelSectionRow><Notice tone="warn">Close the game before changing its runtime configuration.</Notice></PanelSectionRow>
           ) : null}
         </PanelSection>
       ) : null}

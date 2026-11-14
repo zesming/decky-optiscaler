@@ -1196,7 +1196,7 @@ def target_transaction(target_dir, extra_names=(), require_stopped=False,
             raise RuntimeError(
                 f"operation failed and rollback could not finish; recovery journal remains at {journal}: "
                 f"{rollback_error}"
-            ) from operation_error
+            ) from (rollback_error if isinstance(rollback_error, GameRunningError) else operation_error)
         try:
             _persist_transaction(state, target, status="committed")
         except Exception as commit_error:
@@ -1222,7 +1222,7 @@ def target_transaction(target_dir, extra_names=(), require_stopped=False,
                 raise RuntimeError(
                     f"transaction commit marker failed and rollback could not finish; "
                     f"recovery journal remains at {journal}: {rollback_error}"
-                ) from commit_error
+                ) from (rollback_error if isinstance(rollback_error, GameRunningError) else commit_error)
             try:
                 _persist_transaction(state, target, status="committed")
             except Exception as rollback_mark_error:
@@ -1551,12 +1551,16 @@ def import_fsr4_files(target_dir, source_dir, logger=None):
     return {"path": str(target), "imported": names, "source": str(source)}
 
 
+class GameRunningError(RuntimeError):
+    pass
+
+
 def require_stopped_target(target_dir):
     """Reject runtime mutation while a game has the target mapped or attached."""
     target = Path(target_dir).resolve()
     status = live.status(target)
     if status.get("attached") or status.get("legacy_running"):
-        raise RuntimeError("Close the game before changing files in this game directory.")
+        raise GameRunningError("Close the game before changing files in this game directory.")
 
     prefix = str(target) + "/"
     translations = (("\\040", " "), ("\\011", "\t"), ("\\012", "\n"),
@@ -1576,7 +1580,7 @@ def require_stopped_target(target_dir):
             if mapped.endswith(" (deleted)"):
                 mapped = mapped[:-10]
             if mapped == str(target) or mapped.startswith(prefix):
-                raise RuntimeError("Close the game before changing files in this game directory.")
+                raise GameRunningError("Close the game before changing files in this game directory.")
     return True
 
 
@@ -1694,8 +1698,39 @@ def replace_directory_from(source, destination, target_dir):
             os.replace(old, destination)
 
 
+def pending_target_transaction(target_dir):
+    target = Path(target_dir).resolve()
+    if str(target) in getattr(_TRANSACTIONS, "targets", {}):
+        return False
+    if not target.is_dir():
+        return False
+    for path in target.iterdir():
+        if (not path.name.startswith(TRANSACTION_PREFIX)
+                or path.name.startswith((TRANSACTION_PREPARING_PREFIX, TRANSACTION_RETIRING_PREFIX))):
+            continue
+        try:
+            record = json.loads((path / TRANSACTION_RECORD).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            if not path.exists():  # Atomically retired by another worker.
+                continue
+            return True
+        except (OSError, ValueError):
+            return True  # An unreadable published journal requires manual recovery.
+        if not isinstance(record, dict):
+            return True
+        if record.get("status") == "committed":
+            continue
+        if (record.get("intent") == TRANSACTION_INTENT_MANAGED_INI
+                and record.get("require_stopped") is False):
+            continue
+        return True
+    return False
+
+
 def runtime_current(target_dir):
     """Whether the installed proxy bytes match this plugin's pinned runtime."""
+    if pending_target_transaction(target_dir):
+        return False
     manifest = read_manifest(target_dir)
     filename = manifest.get("filename") if manifest else None
     if filename not in PROXY_FILENAMES:
@@ -2490,6 +2525,11 @@ def install(target_dir, payload_root, filename=DEFAULT_PROXY, preserve_ini=True,
             created.append(INI_NAME)
 
         for name in PAYLOAD_FILES:
+            if preserve_ini and name.lower().endswith(".ini"):
+                existing_ini = _safe_path(target, name)
+                if _path_exists(existing_ini):
+                    _require_path_type(existing_ini, directory=False)
+                    continue
             if name == FFX_UPSCALER_DLL and selected_build:
                 if name not in created:
                     created.append(name)

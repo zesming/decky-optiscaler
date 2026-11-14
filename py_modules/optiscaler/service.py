@@ -6,7 +6,7 @@ import stat
 import time
 from pathlib import Path
 
-from . import autoplan, fsr4build, gameprofiles, installer, live, monitor, reframework, restorepoint, steam
+from . import autoplan, constants, fsr4build, gameprofiles, installer, live, monitor, reframework, restorepoint, steam
 from .constants import (
     DEFAULT_PROXY,
     LIVE_CONTROL_SUPPORTED,
@@ -373,6 +373,9 @@ class OptiScalerService:
 
             info = installer.detect(target)
             info["runtime_current"] = installer.runtime_current(target)
+            info["runtime_recovery_needed"] = installer.pending_target_transaction(target)
+            info["runtime_upgrade_held"] = self.settings.get_pref(
+                _runtime_hold_key(target)) == constants.RUNTIME_DLL_SHA256
             info["rollback"] = restorepoint.info(target)
             ini_info = {"present": False, "legacy": False, "keys": 0}
             ini_path = Path(target) / INI_NAME
@@ -677,10 +680,10 @@ class OptiScalerService:
         try:
             async with self._mutation_lock:
                 def work():
-                    changes = autoplan.setting_changes(plan)
-                    if not self.settings.get_pref(_experiment_key(game_path), False):
-                        changes += autoplan.framegen_changes(plan)
                     with self._config_transaction(target_dir):
+                        changes = autoplan.setting_changes(plan)
+                        if not _keeps_no_framegen(target_dir):
+                            changes += autoplan.framegen_changes(plan)
                         written = self._write_config_sync(target_dir, changes)
                         if not written.get("ok") or written.get("rejected"):
                             raise ValueError(written.get("error") or "Some automatic settings were rejected")
@@ -724,17 +727,21 @@ class OptiScalerService:
                     if saved_game and game_path and saved_game != game_path:
                         raise ValueError("Restore point belongs to a different game.")
                     before = self.settings.snapshot_game(saved_game) if saved_game else None
+                    hold_key = _runtime_hold_key(target_dir)
+                    before_hold = self.settings.get_pref(hold_key)
                     preferences_changed = False
                     # Keep the restore point until Remove so a Steam setter failure can be retried.
                     try:
                         with installer.target_transaction(target_dir, require_stopped=True):
                             restored = restorepoint.restore(target_dir)
                             if saved_game and metadata.get("game_settings") is not None:
-                                self.settings.restore_game(saved_game, metadata["game_settings"])
+                                self.settings.restore_game(saved_game, metadata["game_settings"],
+                                    runtime_hold=(hold_key, constants.RUNTIME_DLL_SHA256))
                                 preferences_changed = True
                     except Exception:
                         if preferences_changed:
-                            self.settings.restore_game(saved_game, before)
+                            self.settings.restore_game(saved_game, before,
+                                runtime_hold=(hold_key, before_hold))
                         raise
                     return {"ok": True, **restored, "launch_options": metadata.get("launch_options"),
                             "restart_required": True}
@@ -789,9 +796,14 @@ class OptiScalerService:
             return {"ok": False, "error": str(exc)}
 
     # -- install ---------------------------------------------------------
+    async def upgrade_runtime(self, target_dir, game_path, launch_options=None, name=None):
+        return await self.install(target_dir, game_path=game_path,
+                                  launch_options=launch_options, upgrade_only=True, upgrade_name=name)
+
     async def install(self, target_dir, filename=DEFAULT_PROXY, preserve_ini=True,
                       optipatcher=False, reframework_plan=None, config_changes=None, game_path=None,
-                      launch_options=None, auto_mode=False, framegen_changes=None):
+                      launch_options=None, auto_mode=False, framegen_changes=None,
+                      upgrade_only=False, upgrade_name=None):
         """Install OptiScaler, and REFramework first when the plan calls for it.
 
         A failed REFramework download does not fail the install. The two are
@@ -828,6 +840,22 @@ class OptiScalerService:
             payload_root = await self.ensure_payload()
             async with self._mutation_lock:
                 def work():
+                    if upgrade_only:
+                        target = Path(target_dir).resolve()
+                        root = Path(game_path).resolve() if game_path else None
+                        saved = self.settings.get_target(game_path) if game_path else None
+                        if (root is None or (saved and Path(saved).resolve() != target)
+                                or (not saved and not target.is_relative_to(root))):
+                            raise ValueError("This target belongs to a different game.")
+                        wiki_identity = self.settings.get_wiki_entry(game_path)
+                        if gameprofiles.has_pbz_identity(game_path, upgrade_name, wiki_identity):
+                            pbz = gameprofiles.target_for(game_path, upgrade_name, wiki_identity)
+                            if not pbz or Path(pbz).resolve() != target:
+                                raise ValueError("Choose the main PBZ.exe folder before upgrading this install.")
+                        point = restorepoint.info(target)
+                        if point.get("available") and point.get("metadata", {}).get("game_path") != game_path:
+                            raise ValueError("Restore point belongs to a different game.")
+                        installer.require_stopped_target(target_dir)
                     live_source = self.live_asi_path()
                     patcher_source = self.optipatcher_path() if optipatcher else None
                     if optipatcher and not patcher_source:
@@ -838,13 +866,36 @@ class OptiScalerService:
                     )
                     installer.recover_target_transactions(target_dir)
                     before = self.settings.snapshot_game(game_path) if game_path else None
+                    hold_key = _runtime_hold_key(target_dir)
+                    before_hold = self.settings.get_pref(hold_key)
                     existing = installer.read_manifest(target_dir) or {}
                     if game_path and existing.get("game_path") not in (None, game_path):
                         raise ValueError("This install belongs to a different game.")
+                    selected_filename = filename
+                    if upgrade_only:
+                        if not game_path or not existing:
+                            raise ValueError("Automatic upgrade requires a managed game install.")
+                        if installer.runtime_current(target_dir):
+                            return {"upgraded": False}
+                        if self.settings.get_pref(_runtime_hold_key(target_dir)) == constants.RUNTIME_DLL_SHA256:
+                            return {"upgraded": False, "held": True}
+                        selected_filename = existing.get("filename")
+                        if selected_filename not in PROXY_FILENAMES:
+                            raise ValueError("The installed proxy filename is unknown.")
+                        expected = constants.UPGRADE_RUNTIME_HASHES.get(existing.get("optiscaler_version"))
+                        proxy = installer._safe_path(target_dir, selected_filename)
+                        if not expected or not proxy.is_file() or installer._sha256_file(proxy) != expected:
+                            raise ValueError("The installed runtime is not a recognized upgrade source. Use Manual setup to review it.")
+                        point = restorepoint.create(target_dir, {
+                            "game_path": game_path, "game_settings": before,
+                            "launch_options": launch_options,
+                        })
+                        if not point.get("available") or point.get("metadata", {}).get("game_path") != game_path:
+                            raise ValueError("A matching restore point is required before upgrading.")
                     try:
                         with installer.target_transaction(target_dir, require_stopped=True):
                             result = installer.install(
-                                target_dir, payload_root, filename, preserve_ini, self.log,
+                                target_dir, payload_root, selected_filename, preserve_ini, self.log,
                                 live_source, patcher_source,
                                 ref_files, ref_revision, self.plugin_dir)
                             # Migrate only the changed option; preserve comments and every other value.
@@ -854,16 +905,16 @@ class OptiScalerService:
                                 ini.set("FSR", "Fsr4ForceEnableInt8", "1" if value == "true" else "0")
                                 self._save_ini(ini)
                             changes = list(config_changes or [])
-                            if not self.settings.get_pref(_experiment_key(game_path), False):
+                            if not _keeps_no_framegen(target_dir):
                                 changes += list(framegen_changes or [])
-                            if (result.get("live", {}).get("installed")
+                            if not upgrade_only and (result.get("live", {}).get("installed")
                                     or result.get("optipatcher", {}).get("installed")):
                                 changes += live.ini_requirements()
                             written = self._write_config_sync(target_dir, changes, push_live=False)
                             if not written.get("ok") or written.get("rejected"):
                                 raise ValueError(written.get("error") or "Automatic settings were rejected")
                             result["applied"] = written.get("applied", [])
-                            if launch_options is not None:
+                            if not upgrade_only and launch_options is not None:
                                 if not isinstance(launch_options, str):
                                     raise ValueError("Launch options must be a string or unknown (null).")
                                 installer.record_launch_options(target_dir, launch_options, self.log)
@@ -872,11 +923,13 @@ class OptiScalerService:
                                 manifest.setdefault("game_path", game_path)
                                 manifest.setdefault("game_settings_before", before)
                                 self._save_manifest(target_dir, manifest)
-                                self.settings.configure_game(game_path, target_dir, bool(auto_mode))
-                            return result
+                                if not upgrade_only:
+                                    self.settings.configure_game(game_path, target_dir, bool(auto_mode))
+                            return {**result, **({"upgraded": True} if upgrade_only else {})}
                     except Exception:
                         if game_path and before is not None:
-                            self.settings.restore_game(game_path, before)
+                            self.settings.restore_game(game_path, before,
+                                runtime_hold=(hold_key, before_hold))
                         raise
                 result = await self._run(work)
             if (result.get("live", {}).get("installed")
@@ -891,6 +944,12 @@ class OptiScalerService:
                 result["reframework"] = {**installed, **ref_result}
             return {"ok": True, **result}
         except Exception as exc:  # surfaced verbatim in the UI
+            if upgrade_only:
+                cause = exc
+                while cause is not None:
+                    if isinstance(cause, installer.GameRunningError):
+                        return {"ok": True, "deferred": True, "upgraded": False}
+                    cause = cause.__cause__
             self.log.exception("install failed for %s", target_dir)
             return {"ok": False, "error": str(exc)}
 
@@ -902,16 +961,24 @@ class OptiScalerService:
                     manifest = installer.read_manifest(target_dir) or {}
                     game_path = manifest.get("game_path")
                     before = self.settings.snapshot_game(game_path) if game_path else None
+                    hold_key = _runtime_hold_key(target_dir)
+                    before_hold = self.settings.get_pref(hold_key)
                     preferences_changed = False
                     try:
                         with installer.target_transaction(target_dir, extra_names=(restorepoint.RESTORE_DIR,), require_stopped=True):
                             result = installer.uninstall(target_dir, remove_ini, self.log)
                             if game_path and manifest.get("game_settings_before") is not None:
-                                self.settings.restore_game(game_path, manifest["game_settings_before"])
+                                self.settings.restore_game(game_path, manifest["game_settings_before"],
+                                    runtime_hold=(hold_key, None))
                                 preferences_changed = True
+                            elif before_hold is not None:
+                                self.settings.set_pref(hold_key, None)
                     except Exception:
                         if preferences_changed:
-                            self.settings.restore_game(game_path, before)
+                            self.settings.restore_game(game_path, before,
+                                runtime_hold=(hold_key, before_hold))
+                        elif before_hold is not None:
+                            self.settings.set_pref(hold_key, before_hold)
                         raise
                     return result
                 result = await self._run(work)
@@ -1340,3 +1407,13 @@ def _auto_key(game_path):
 
 def _experiment_key(game_path):
     return f"deck-experiment:{game_path}"
+
+
+def _runtime_hold_key(target_dir):
+    return f"runtime-upgrade-hold:{Path(target_dir).resolve()}"
+
+
+def _keeps_no_framegen(target_dir):
+    ini = IniFile(Path(target_dir) / INI_NAME)
+    return any(str(ini.get("FrameGen", key, "auto")).lower() == "nofg"
+               for key in ("FGInput", "FGOutput"))

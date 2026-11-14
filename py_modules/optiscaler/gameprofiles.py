@@ -8,8 +8,6 @@ PBZ_TARGET = "PBZ/platform/steam"
 PBZ_STEPS = [
     "Install beside the main PBZ.exe in PBZ/platform/steam (not the usual Unreal Binaries folder).",
     "Keep the game's Super Resolution Output Scale at 100%; change only the upscaler preset.",
-    "For the Steam Deck / LSFG experiment, turn off frame generation in the game and in OptiScaler; configure lsfg-vk separately.",
-    "The wiki was tested on Windows 11 / RX 9070XT. Steam Deck / Proton operation is experimental and must be verified in game.",
 ]
 
 
