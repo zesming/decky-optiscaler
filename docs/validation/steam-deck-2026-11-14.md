@@ -23,7 +23,11 @@ Package `0.0.8-pbz.3` removes the dedicated experiment UI and adds runtime upgra
 
 Regression checks cover legacy manifests, conflicting game/snapshot identities, interrupted binary upgrades, a game starting during preflight, explicit rollback holds, Remove, cross-thread INI saves, and explicit nofg choices without a private experiment preference. A dedicated seventh UI harness covers post-upgrade editing, running/deferred states, held versions, retry on reopening, and leaving the page during a Steam launch-options read.
 
-The physical gameplay and recovery evidence below is from `pbz.2`; the core and native bridge are unchanged in `pbz.3`. Device deployment and old-game automatic upgrade verification remain pending while the device is unreachable.
+After the device reconnected, `pbz.3` was installed through Decky's normal same-name replacement, with one plugin instance. Opening an existing managed 0.9.4 game page automatically upgraded its verified core to pre5, created the restore point, and immediately unlocked settings. Steam launch options were unchanged; the only INI value change was the expected INT8 `true` → `1` migration.
+
+The real **Restore previous install** UI restored all **48 snapshot records**, including content, modes and absence, and the captured launch options. Reopening the game page retained 0.9.4 and showed the explicit rollback hold. The test hold was then cleared through the plugin preference API, and reopening restored the upgraded installation without replacing the snapshot. The final game configuration and preferences were preserved, except for the intended INT8 migration. Other managed game files matched their recorded hashes and modes; PBZ retained its FSR 4.1.1b INT8/nofg configuration. Actual PBZ Setup showed the wiki path/100% requirements without the former personal experiment action, and Basic omitted the FG hint while FG was off.
+
+The physical gameplay and PBZ full-Remove evidence below is from `pbz.2`; the core and native bridge are unchanged in `pbz.3`. The additional game's gameplay/FG GPU behavior was not tested during this upgrade/recovery check.
 
 ## Real-game live control
 
