@@ -2,7 +2,7 @@
 
 - 日期：2026-11-14
 - 审查版本：main@4feb73e7f956dfb3156e4d27e1c7b40ef147dada
-- 修复分支：codex/audit/2026-11-14；PR：待公开内容确认后创建到 zesming/decky-optiscaler main
+- 修复分支：codex/audit/2026-11-14；PR：[zesming/decky-optiscaler #1](https://github.com/zesming/decky-optiscaler/pull/1)（仅 fork，draft，目标 main；暂不合入）
 - 审查范围：第一方产品路径、全部 UI/状态流、Python 后端、ASI 集成边界、脚本和测试；上游算法不在范围。
 - 手段：初始审查为四个独立维度审查者、一个独立 verifier 全条目质证；静态阅读、真实后端/React 临时探针、局部 C++ ASAN、项目基线。后续修复另经独立复核、自动化回归和一台 OLED 的 Decky/游戏启动与恢复实测，范围见修复跟踪及设备记录。
 - 内部评审：一轮，33 个原始 ID 合并为 28 个行动组；32 个缺陷确认，1 个焦点风险降为观察；无驳回、无未充分质证。代码严重度按可证影响调整。
