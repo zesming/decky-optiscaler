@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getLiveStatus } from "../api";
+import { beginTargetLiveStatusRequest } from "../config/liveRecord";
 import type { LiveStatus } from "../types";
 
 const POLL_MS = 4000;
 
 /** Tracks live support and connection state for one install, ignoring stale replies. */
 export function useLiveStatus(targetDir: string | null, active: boolean) {
-  const [snapshot, setSnapshot] = useState<{ target: string | null; status: LiveStatus | null }>({
+  const [snapshot, setSnapshot] = useState<{
+    target: string | null;
+    status: LiveStatus | null;
+    statusEpoch: number | null;
+  }>({
     target: null,
     status: null,
+    statusEpoch: null,
   });
   const targetRef = useRef(targetDir);
   targetRef.current = targetDir;
@@ -18,17 +24,34 @@ export function useLiveStatus(targetDir: string | null, active: boolean) {
     const target = targetDir;
     const sequence = ++request.current;
     if (!target) {
-      setSnapshot({ target: null, status: null });
+      setSnapshot({ target: null, status: null, statusEpoch: null });
       return;
     }
+    const statusEpoch = beginTargetLiveStatusRequest(target);
     try {
       const status = await getLiveStatus(target);
       if (targetRef.current === target && request.current === sequence) {
-        setSnapshot({ target, status });
+        setSnapshot({ target, status, statusEpoch });
       }
     } catch {
-      // Keep the last answer for this target; the panel can still explain that
-      // it has not reported, and another explicit refresh can retry it.
+      if (targetRef.current === target && request.current === sequence) {
+        setSnapshot((current) => current.target === target && current.status
+          ? {
+              target,
+              status: {
+                ...current.status,
+                attached: false,
+                ready: false,
+                state: "disconnected",
+                ack: undefined,
+                accepted_keys: [],
+                failed_keys: [],
+                error: "Could not refresh live status for this game.",
+              },
+              statusEpoch: null,
+            }
+          : current);
+      }
     }
   }, [targetDir]);
 
@@ -41,6 +64,7 @@ export function useLiveStatus(targetDir: string | null, active: boolean) {
 
   return {
     status: snapshot.target === targetDir ? snapshot.status : null,
+    statusEpoch: snapshot.target === targetDir ? snapshot.statusEpoch : null,
     refresh,
   };
 }

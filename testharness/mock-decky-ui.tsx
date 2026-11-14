@@ -28,7 +28,7 @@ const box = (name: string) =>
     for (const key of Object.keys(rest)) {
       if (key.startsWith("data-")) passthrough[key] = rest[key];
     }
-    const activate = rest.onClick ?? rest.onActivate;
+    const activate = rest.disabled ? undefined : rest.onClick ?? rest.onActivate;
     if (activate) passthrough.onClick = activate;
     return (
       <div
@@ -54,7 +54,9 @@ const box = (name: string) =>
                 key={i}
                 data-opt
                 data-opt-value={String(o.data)}
-                onClick={() => rest.onChange?.({ data: o.data, label: o.label })}
+                onClick={() => {
+                  if (!rest.disabled) rest.onChange?.({ data: o.data, label: o.label });
+                }}
               >
                 {String(o.label)}
               </span>

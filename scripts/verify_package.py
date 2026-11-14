@@ -12,7 +12,7 @@ import asyncio, hashlib, json, logging, sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 plugin=Path(sys.argv[1]); sys.path.insert(0,str(plugin/'py_modules'))
-from optiscaler import constants, fsr4build, gameprofiles, installer, restorepoint
+from optiscaler import constants, fsr4build, gameprofiles, installer, live, restorepoint
 from optiscaler.service import OptiScalerService
 from optiscaler.inifile import IniFile
 root=plugin.parent
@@ -55,7 +55,14 @@ async def verify():
  assert reapplied['ok'],reapplied
  assert IniFile(target/'OptiScaler.ini').get('FrameGen','FGInput')=='nofg'
  assert not (await service.get_live_status(str(target)))['attached']
- assert not (target/'plugins/decky_optiscaler_live.asi').exists()
+ bridge=target/'plugins/decky_optiscaler_live.asi'
+ assert bridge.is_file() and installer.read_manifest(target).get('live_asi') is True
+ build=json.loads((plugin/'defaults/live-build.json').read_text())
+ assert hashlib.sha256(bridge.read_bytes()).hexdigest()==build['sha256']
+ assert not (await service.get_live_status(str(target)))['ready']
+ deferred=await service.write_config(str(target),[{'section':'Menu','key':'ShowFps','value':'true'}])
+ assert deferred['ok'] and not deferred['live'].get('confirmed') and not deferred['live'].get('sent'),deferred
+ assert not (target/live.CMD_FILE).exists(),'no command may be sent without a native session'
  stock=await service.restore_fsr4_build(str(target));assert stock['ok'],stock
  assert fsr4build.identify(target/constants.FFX_UPSCALER_DLL)['id']=='bundled'
  rolled=await service.rollback_install(str(target),str(game));assert rolled['ok'],rolled
@@ -84,8 +91,19 @@ def main():
                 parts = PurePosixPath(name).parts
                 if not parts or parts[0] != 'Decky OptiScaler' or '..' in parts or PurePosixPath(name).is_absolute():
                     raise ValueError(f'Unsafe zip entry: {name}')
-            if any(name.endswith('/decky_optiscaler_live.asi') for name in names):
-                raise AssertionError('Incompatible live ASI was shipped')
+            required = {'Decky OptiScaler/bin/decky_optiscaler_live.asi',
+                        'Decky OptiScaler/defaults/live-profile.json',
+                        'Decky OptiScaler/defaults/live-build.json'}
+            if not required.issubset(names):
+                raise AssertionError('Native bridge or its identity metadata is missing')
+            build = json.loads(zf.read('Decky OptiScaler/defaults/live-build.json'))
+            profile = json.loads(zf.read('Decky OptiScaler/defaults/live-profile.json'))
+            import hashlib
+            if hashlib.sha256(zf.read('Decky OptiScaler/bin/decky_optiscaler_live.asi')).hexdigest() != build['sha256']:
+                raise AssertionError('Packaged bridge hash does not match its identity metadata')
+            if (build['schema'], build['build_id'], build['profile_id'], build['core_sha256']) != (
+                    profile['schema'], profile['build_id'], profile['profile_id'], profile['core_sha256']):
+                raise AssertionError('Packaged bridge profile does not match its identity metadata')
             zf.extractall(root)
         subprocess.run([sys.executable, '-c', PROBE, str(root/'Decky OptiScaler')], check=True)
     print('Final zip offline lifecycle: PASS')

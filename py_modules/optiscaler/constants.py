@@ -260,9 +260,18 @@ STEAM_ROOTS = [
     ".var/app/com.valvesoftware.Steam/data/Steam",
 ]
 
-# Live ABI remains pinned to 0.9.4 and is deliberately unavailable in this beta.
-LIVE_CONTROL_SUPPORTED = False
-LIVE_CONTROL_REASON = "Live control is not supported with this experimental runtime. Save settings and restart the game."
+# Live control is built for one reviewed OptiScaler ABI. This flag describes
+# the code shipped by the plugin; whether one game can use it is determined
+# from that game's manifest, runtime, installed ASI and matching live heartbeat.
+LIVE_CONTROL_SUPPORTED = True
+LIVE_CONTROL_REASON = None
+LIVE_SCHEMA = 7
+LIVE_BUILD_ID = "decky-live-pre5-v2"
+LIVE_PROFILE_ID = "optiscaler-0.9.5-pre5-6cbd89b"
+LIVE_SOURCE_COMMIT = "6cbd89b887f5f186c294e2fe2b3024692ea21007"
+LIVE_CORE_SHA256 = "bd6fe5e7defdf7520ecd7a45eb3b5fe173d70551af5ad4a21b2837dd5d2e8a28"
+LIVE_PROFILE_FILE = "live-profile.json"
+LIVE_BUILD_FILE = "live-build.json"
 LIVE_OPTISCALER_VERSION = "0.9.4"
 LEGACY_LIVE_ASI_SHA256 = "ca4db054e42864a4bf754a18dc6288e7b9be888e24d119916ddedaef3c5de207"
-RUNTIME_DLL_SHA256 = "bd6fe5e7defdf7520ecd7a45eb3b5fe173d70551af5ad4a21b2837dd5d2e8a28"
+RUNTIME_DLL_SHA256 = LIVE_CORE_SHA256

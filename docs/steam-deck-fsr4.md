@@ -8,4 +8,4 @@ The new core reads `FSR.Fsr4ForceEnableInt8` as a model number: `0` disabled, `1
 
 Basic's FSR preset remains independent of frame generation. The explicit PBZ / LSFG experiment also switches OptiScaler FG off and lists the required in-game steps. Restoring the stock FSR DLL does not restore the whole experiment; use **Restore previous install** for that, or **Remove** to restore the earliest original game files and recorded launch options.
 
-All settings require a game restart in this beta. Its new runtime is not compatible with the archived Decky live ASI.
+The [matching live bridge](live-control.md) can apply supported per-frame settings, backends and available FFX-version changes after a confirmed game response. Model/provider selection, INT8 and loader changes still require restarting the game. FSR4 file identity and saved settings alone do not prove the active model.

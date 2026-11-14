@@ -8,9 +8,10 @@ This experimental package contains:
 - The stable support libraries and a verified community **FSR 4.1.1b INT8 RDNA2 fix** archive for offline setup.
 - A PBZ setup profile for the main `PBZ/platform/steam/PBZ.exe`, with visible 100% output-scale and other manual requirements.
 - An explicit Steam Deck / LSFG experiment which disables OptiScaler FG and leaves lsfg-vk separate.
+- A native live-control bridge pinned to this exact core, with per-game capabilities and confirmed command results.
 - Original-file backups, an upgrade restore point, precise launch-options merging, and Remove support for new experiment files.
 
-**Steam Deck gameplay, image quality and performance still require device testing.** The core and support libraries are a pinned repack, not an upstream full 0.9.5 release. The bundled old live ASI has been removed because its memory layout does not match the new runtime. Settings apply after restarting the game. Existing old/unknown runtime installs are read-only until explicitly upgraded in Setup.
+The core and support libraries are a pinned repack, not an upstream full 0.9.5 release. Live control requires the matching core and bridge installed into each game. Saving an INI is separate from submitting a live configuration request; actual runtime state is reported separately, and model/provider and other startup settings still require a restart. Existing old/unknown runtime installs are read-only until explicitly upgraded in Setup. See the [live-control guide](docs/live-control.md) for connection and recovery states. Device evidence is separate from image-quality, performance and long-session claims.
 
 See [PBZ setup, verification and complete recovery](docs/phantom-blade-zero.md) before testing. The existing [FSR 4 guide](docs/steam-deck-fsr4.md) explains the stock/community distinction.
 
@@ -32,6 +33,9 @@ pnpm build
 python3 scripts/selftest.py
 python3 scripts/test_fsr4.py
 python3 scripts/test_recovery.py
+python3 scripts/test_live.py
+python3 scripts/test_live_rpc.py
+python3 scripts/live_metadata.py --check
 HARNESS=run.tsx node testharness/build-and-run.mjs
 HARNESS=all-options.tsx node testharness/build-and-run.mjs
 HARNESS=live-fields.tsx node testharness/build-and-run.mjs
@@ -42,7 +46,7 @@ python3 scripts/package.py
 python3 scripts/verify_package.py 'out/Decky OptiScaler.zip'
 ```
 
-The archived 0.9.4 ASI references are retained for independent development; `asi/build.sh` is not a supported way to enable live control for this beta. Do not copy an old ASI into the upgraded game.
+The native bridge uses the fixed pre5 source references and PDB-backed profile. Rebuilding requires **Zig 0.15.2**: run `bash asi/build.sh` before packaging, then `python3 scripts/live_metadata.py --check`. Windows CI compiles and runs native behavior tests and checks that rebuilding reproduces the shipped binary metadata. Do not copy a bridge from another OptiScaler build into a game.
 
 ## Credits
 

@@ -12,7 +12,14 @@ import { toaster } from "@decky/api";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { applyAutoSettings, getGame, rollbackInstall, setAutoMode, setupDeckExperiment } from "../api";
 import { invalidateTargetReads, serializeTargetWrite } from "../config/writeRecord";
-import { TABS } from "../config/tabs";
+import { TABS, optionsInSection } from "../config/tabs";
+import { AUTO } from "../config/values";
+import {
+  bindLiveChanges,
+  liveContextForField,
+  liveFfxVersionChoices,
+  liveResultIsComplete,
+} from "../liveControl";
 import { useAutoPlan } from "../hooks/useAutoPlan";
 import { useConfig } from "../hooks/useConfig";
 import { restartGame, setLaunchOptions } from "../hooks/useRunningGame";
@@ -21,6 +28,8 @@ import { preserveExistingInstall } from "../launchOptions";
 import type {
   GameDetail as GameDetailData,
   LiveApplyResult,
+  LiveContext,
+  OptionMeta,
   PayloadStatus,
   RunningGame,
 } from "../types";
@@ -30,6 +39,7 @@ import { ConfigTab } from "./ConfigTab";
 import { DetailHeader, ModeSwitch } from "./DetailHeader";
 import { InstallPanel } from "./InstallPanel";
 import { LiveStats } from "./LiveStats";
+import { LiveOutcome } from "./LiveOutcome";
 import { MonitorTab } from "./MonitorTab";
 import { SetupChecklist } from "./SetupChecklist";
 
@@ -195,7 +205,86 @@ export function GameDetail({
     await config.flush();
     if (targetDir) invalidateTargetReads(targetDir);
   };
-  const { status: liveStatus, refresh: refreshLive } = useLiveStatus(targetDir, isRunning);
+  const { status: liveStatus, statusEpoch: liveStatusEpoch, refresh: refreshLive } = useLiveStatus(targetDir, isRunning);
+  useEffect(() => config.reconcileLiveStatus(liveStatus, liveStatusEpoch), [
+    config.reconcileLiveStatus, liveStatus, liveStatusEpoch, config.livePending,
+  ]);
+  const applyAdvancedOption = (
+    option: OptionMeta,
+    value: string,
+    selectedContext?: LiveContext | null,
+  ) => {
+    const selected = selectedContext === undefined
+      ? bindLiveChanges(
+          [{ section: option.section, key: option.key, value }],
+          liveStatus,
+          targetDir,
+        )[0]?.live_context
+      : selectedContext;
+    config.setOption(option, value, selected ?? undefined);
+  };
+  const resetAdvancedSection = (section: string) => {
+    const changes = optionsInSection(section).map((option) => ({
+      section: option.section,
+      key: option.key,
+      value: AUTO,
+    }));
+    const bindings: Record<string, LiveContext> = {};
+    for (const change of bindLiveChanges(changes, liveStatus, targetDir)) {
+      if (change.live_context) bindings[`${change.section}.${change.key}`] = change.live_context;
+    }
+    config.resetSection(section, bindings);
+  };
+  const liveFfxFgChoices = liveFfxVersionChoices(liveStatus, targetDir, "fg");
+  const liveFfxUpscalerChoices = liveFfxVersionChoices(liveStatus, targetDir, "upscaler");
+  const fgRuntimeIndex = liveStatus?.fg_index;
+  const fgRuntimeVersion = typeof fgRuntimeIndex === "number"
+    ? liveStatus?.ffx_fg_versions?.[fgRuntimeIndex]
+    : null;
+  const upscalerRuntimeIndex = liveStatus?.ffx_upscaler_index;
+  const upscalerRuntimeVersion = typeof upscalerRuntimeIndex === "number"
+    ? liveStatus?.ffx_upscaler_versions?.[upscalerRuntimeIndex]
+    : null;
+  const runtimeChoices = liveFfxFgChoices.length || liveFfxUpscalerChoices.length
+    ? {
+        ...(liveFfxFgChoices.length > 0 ? {
+          "FSR.FGIndex": [
+            {
+              value: AUTO,
+              label: fgRuntimeVersion
+                ? `Auto · running FSR ${fgRuntimeVersion}`
+                : "Auto · runtime unknown",
+              context: liveStatus?.capabilities?.reset_auto === true
+                ? liveContextForField(liveStatus, targetDir, "FSR.FGIndex", "change_fg_index")
+                : null,
+            },
+            ...liveFfxFgChoices.map((choice) => ({
+              value: choice.data,
+              label: choice.label,
+              context: choice.context,
+            })),
+          ],
+        } : {}),
+        ...(liveFfxUpscalerChoices.length > 0 ? {
+          "FSR.UpscalerIndex": [
+            {
+              value: AUTO,
+              label: upscalerRuntimeVersion
+                ? `Auto · running FSR ${upscalerRuntimeVersion}`
+                : "Auto · runtime unknown",
+              context: liveStatus?.capabilities?.reset_auto === true
+                ? liveContextForField(liveStatus, targetDir, "FSR.UpscalerIndex", "change_ffx_upscaler")
+                : null,
+            },
+            ...liveFfxUpscalerChoices.map((choice) => ({
+              value: choice.data,
+              label: choice.label,
+              context: choice.context,
+            })),
+          ],
+        } : {}),
+      }
+    : undefined;
   const runtimeCurrent =
     detail?.install.runtime_current === true && config.runtimeCurrent === true;
   const {
@@ -241,7 +330,7 @@ export function GameDetail({
         if (!result.ok) throw new Error(result.error ?? "Could not apply the wiki settings.");
         await config.authoritativeReload();
         const live = (result as { live?: LiveApplyResult }).live;
-        if (live?.sent && (live.deferred?.length ?? 0) === 0) config.clearDirty();
+        if (liveResultIsComplete(live)) config.clearDirty();
         else config.markDirty();
         await reloadPlan(false);
         toaster.toast({ title: "Automatic settings applied", body: detailName(plan, gameName) });
@@ -383,31 +472,16 @@ export function GameDetail({
 
   // Changes the running game already took need no restart, so say so instead of
   // nagging: this is the whole point of the in-game live-control plugin.
-  const liveBanner =
-    installed && liveStatus?.supported === true && !config.dirty && config.live?.sent ? (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "8px",
-          margin: "0 12px 4px",
-          padding: "5px 9px",
-          borderLeft: "3px solid #4c9b4c",
-          background: "rgba(76,155,76,0.12)",
-          borderRadius: "3px",
-          fontSize: "12px",
-          flexShrink: 0,
-        }}
-      >
-        <span style={{ flexGrow: 1 }}>
-          Applied in-game — no restart needed.
-          {config.live.backend_change ? " The upscaler reloads on the next frame." : ""}
-        </span>
-      </div>
-    ) : null;
+  const liveBanner = installed && config.saving ? (
+    <div style={{ margin: "0 12px 4px", padding: "5px 9px", borderLeft: "3px solid #1a9fff", background: "rgba(255,255,255,0.04)", borderRadius: "3px", fontSize: "12px", flexShrink: 0 }}>
+      Saving settings…
+    </div>
+  ) : installed && config.live ? (
+    <LiveOutcome result={config.live} status={liveStatus} />
+  ) : null;
 
   const restartBanner =
-    installed && config.dirty ? (
+    installed && config.restartRequired ? (
       <div
         style={{
           display: "flex",
@@ -504,6 +578,7 @@ export function GameDetail({
                   status={status}
                   appid={appid}
                   live={liveStatus}
+                  running={isThisGameRunning}
                   onBeforeMutation={beforeConfigMutation}
                   onChanged={async () => {
                     await load();
@@ -551,6 +626,9 @@ export function GameDetail({
                   }
                   gpu={detail.gpu}
                   live={liveStatus}
+                  liveTargetDir={targetDir ?? undefined}
+                  liveResult={config.live}
+                  onFlush={config.flush}
                   ffx={detail.install.fsr4?.ffx}
                   plan={plan}
                   auto={auto}
@@ -594,8 +672,10 @@ export function GameDetail({
                 values={config.values}
                 disabled={config.loading || config.saving ||
                   !runtimeCurrent}
-                onChange={config.setOption}
-                onResetSection={config.resetSection}
+                onChange={applyAdvancedOption}
+                onResetSection={resetAdvancedSection}
+                runtimeChoices={runtimeChoices}
+                runtimeGeneration={liveStatus?.capability_generation}
               />
             </TabBody>
           ),

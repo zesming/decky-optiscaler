@@ -16,7 +16,7 @@ The setup notes stay visible even without a network connection. This package doe
 
 PBZ's directory/version requirements apply to its recognized title, folder alias, or explicitly selected PBZ wiki entry. Renamed non-Steam shortcuts can select that entry manually, but the canonical directory must still contain `PBZ.exe`. A missing executable or wrong Unreal folder blocks setup until corrected; an existing wrong-folder install remains removable.
 
-Other games keep their own wiki plans, install targets and configuration. The community INT8/FG-off experiment is an explicit action for this game, not a global default. Basic's FSR preset remains separate from FG. The shared core upgrade and disabled live ASI apply to this plugin build generally; updating the plugin alone does not upgrade every game's installed files.
+Other games keep their own wiki plans, install targets and configuration. The community INT8/FG-off experiment is an explicit action for this game, not a global default. Basic's FSR preset remains separate from FG. The shared core upgrade and matching live bridge apply to this plugin build generally; updating the plugin alone does not upgrade every game's installed files.
 
 ## Verify in game
 
@@ -24,7 +24,7 @@ Use a recent Proton build with the VKD3D support required by FSR 4.1. Record the
 
 The displayed DLL identity and saved settings show **configured**, not **active**. Check `OptiScaler.log` or the OptiScaler overlay for the created FidelityFX upscaler and INT8 model. The file version alone cannot distinguish stock 4.1.1 from patched 4.1.1b, which is why the plugin checks SHA-256. Compare the same scene with all FG off, and only then with lsfg-vk on. Keep base FPS separate from generated/displayed FPS. There is no promised FPS improvement.
 
-The Decky live ASI is deliberately unavailable: its internal memory layout is pinned to 0.9.4. This beta never installs it, sends live commands, or trusts its old heartbeat. Settings apply after restarting the game. Unknown same-name ASIs or unresolved custom plugin paths block an upgrade rather than being silently deleted.
+The [native live bridge](live-control.md) is pinned to this exact pre5 core. Upgrade each game in Setup with the game closed; updating Decky alone leaves that game’s native module unchanged. Live controls become available only after a matching game session reaches a supported frame callback. The PBZ/LSFG preset keeps OptiScaler FG input/output disabled; enabling a different FG path still requires a restart. Unknown same-name ASIs or unresolved custom plugin paths block an upgrade rather than being silently deleted.
 
 ## Restore everything
 
@@ -42,6 +42,6 @@ A failed file/configuration commit must leave the pre-operation files and manife
 - [Stable 0.9.4 support bundle](https://github.com/optiscaler/OptiScaler/releases/tag/v0.9.4): the core-only artifact does not contain SDK dependencies. Its existing FFX SDK 2.2 / stock 4.1.1 and other support files are retained. DX12 export/structure compatibility was inspected; one OLED/Proton device initialized the combined path, without proving every render path or performance. This is a repacked Decky payload, not an upstream full 0.9.5 release.
 - [Community 4.1.1b](https://github.com/the3rdparty1917/fsr4xyz/releases/tag/4.1.1b): archive and extracted DLL are independently hash checked. No claim of a native Navi2/FP8 model is made.
 
-Exact hashes and sizes of every payload input are in `defaults/runtime-manifest.json`. The old ABI references remain in source for future work; the old compiled ASI is excluded from the zip.
+Exact hashes and sizes of every payload input are in `defaults/runtime-manifest.json`. The bridge’s ABI and binary/source identities are recorded in `defaults/live-profile.json` and `defaults/live-build.json`. The source references match the pinned pre5 core; the archived 0.9.4 bridge is rejected.
 
 Community reports describe 0.9.4 freezes and conflicting installation locations, often with FG involved. Those are troubleshooting leads, not Steam Deck validation. The official per-game page takes precedence over those recipes. If the experiment still hangs, restore first and share the game's OptiScaler log plus the precise environment versions; do not stack more undocumented tweaks.

@@ -1,0 +1,21 @@
+{
+  "schema": 7,
+  "build_id": "decky-live-pre5-v2",
+  "profile_id": "optiscaler-0.9.5-pre5-6cbd89b",
+  "sha256": "a70d492e677cd366cfbb774f249102a0f1d2e100a0079be10ff2f3ed985dcc13",
+  "core_sha256": "bd6fe5e7defdf7520ecd7a45eb3b5fe173d70551af5ad4a21b2837dd5d2e8a28",
+  "toolchain": {
+    "zig": "0.15.2",
+    "target": "x86_64-windows-gnu"
+  },
+  "source_files": {
+    "asi/directory.h": "54790efcae4b453a5099294626739797fedbd8992747061204a295389e07b145",
+    "asi/generated/config_mirror.h": "816522308c3982ad87bc45af42bfb1fefb912b3bff7549239f02271614bcf9e1",
+    "asi/generated/pdb_assertions.h": "9a99fdf4f27dc41dd86ae74acec5340010bb105e4cdd107638987dec40bd4797",
+    "asi/generated/runtime_profile.h": "bb5aa02cf89b76f36245dfcc65f017e918339c42369ac2af9a9f7868197b8609",
+    "asi/identity.h": "2ecdb20981e0aae3abbe9d9cdc65d0bc5b83314d3b384ebc3310ed5bb66970f8",
+    "asi/live.cpp": "1c51af7f66c539c52ef642502fde352e080586d7bef58cf1131f41f82f53d369",
+    "asi/msvc_abi.h": "fb755d7354da705c5a0e3cdd5f273eeb4b7243de29840d8c96197c2dd70436ad",
+    "defaults/live-profile.json": "f7170b9733a3db7607381616974d1e54b434be2fed241159a5ac614ecd747d12"
+  }
+}

@@ -34,6 +34,7 @@ interface Props {
   status: PayloadStatus | null;
   appid: string | null;
   live: LiveStatus | null;
+  running: boolean;
   onBeforeMutation?: () => Promise<void> | void;
   onChanged: () => Promise<void> | void;
 }
@@ -95,7 +96,7 @@ function LaunchOptionsPrompt({
  * launch options. Reached from "Manual setup" on the setup checklist,
  * which is where the majority of games never have to come.
  */
-export function InstallPanel({ detail, status, appid, live, onBeforeMutation, onChanged }: Props) {
+export function InstallPanel({ detail, status, appid, live, running, onBeforeMutation, onChanged }: Props) {
   const [filename, setFilename] = useState(detail.install.filename ?? "dxgi.dll");
   const [target, setTarget] = useState(detail.target);
   const [preserveIni, setPreserveIni] = useState(false);
@@ -578,7 +579,7 @@ export function InstallPanel({ detail, status, appid, live, onBeforeMutation, on
       ) : null}
 
       {detail.install.installed ? (
-        <LivePanel targetDir={detail.install.path} status={live} onChanged={onChanged} />
+        <LivePanel targetDir={detail.install.path} status={live} running={running} onChanged={onChanged} />
       ) : null}
 
       {detail.install.installed ? (

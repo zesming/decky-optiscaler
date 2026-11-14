@@ -13,7 +13,8 @@ from . import constants, live
 
 RESTORE_DIR = ".decky_optiscaler_restore"
 SNAPSHOT_FILE = "snapshot.json"
-SNAPSHOT_VERSION = 1
+SNAPSHOT_LEGACY_VERSION = 1
+SNAPSHOT_VERSION = 2
 _DIGEST_CACHE = {}
 
 
@@ -165,14 +166,21 @@ def _owned_paths(target, manifest):
     return sorted(files), sorted(dirs)
 
 
-def _candidate_paths(target):
+def _candidate_paths(target, legacy_live_inventory=False):
     """All paths install components may adopt, including initially absent ones."""
     from . import installer
 
-    names = (installer._allowed_file_names() | installer._allowed_dir_names()
+    names = (installer._allowed_file_names() | installer._shared_dir_names()
              | {constants.MANIFEST_NAME, constants.LAUNCH_RECORD_NAME,
                 constants.BACKUP_DIR, constants.INI_NAME})
-    normalized = sorted({_relative(name) for name in names})
+    if legacy_live_inventory:
+        names.difference_update({live.CMD_TEMP_FILE, live.STATUS_TEMP_FILE,
+                                 live.LOG_TEMP_FILE})
+    return sorted({_relative(name) for name in names})
+
+
+def _legacy_candidate_paths(target, legacy_live_inventory=False):
+    normalized = _candidate_paths(target, legacy_live_inventory)
     roots = set(normalized)
     for name in normalized:
         parts = PurePosixPath(name).parts
@@ -180,6 +188,26 @@ def _candidate_paths(target):
                for index in range(1, len(parts))):
             roots.discard(name)
     return sorted(roots)
+
+
+def _candidate_kind(name):
+    from . import installer
+
+    if name == constants.BACKUP_DIR:
+        return installer.TRANSACTION_PRIVATE_TREE
+    if name in installer._shared_dir_names():
+        return installer.TRANSACTION_SHARED_DIR
+    return installer.TRANSACTION_FILE
+
+
+def _candidate_covers(record, name):
+    """Whether a snapshot entry stores this path directly or in an ancestor."""
+    candidates = set(record.get("candidate_paths", []))
+    parts = PurePosixPath(_relative(name)).parts
+    for end in range(len(parts), 0, -1):
+        if PurePosixPath(*parts[:end]).as_posix() in candidates:
+            return True
+    return False
 
 
 def validate_metadata(metadata):
@@ -203,10 +231,21 @@ def validate_metadata(metadata):
     return metadata
 
 
-def _validate_entry_inventory(target, record, content_root):
+def _validate_entry_inventory(target, record, content_root, accept_legacy=True):
     """Verify every candidate and every stored object appears exactly once."""
-    expected = _candidate_paths(target)
-    if record.get("candidate_paths") != expected:
+    from . import installer
+
+    current = _candidate_paths(target)
+    schema_version = record.get("schema_version")
+    if schema_version == SNAPSHOT_VERSION:
+        accepted = [current]
+    elif schema_version == SNAPSHOT_LEGACY_VERSION and accept_legacy:
+        accepted = [_legacy_candidate_paths(target),
+                    _legacy_candidate_paths(target, legacy_live_inventory=True)]
+    else:
+        raise ValueError("restore point uses an unsupported candidate inventory")
+    expected = record.get("candidate_paths")
+    if expected not in accepted:
         raise ValueError("restore point candidate inventory is incomplete")
     entries = record.get("entries")
     if not isinstance(entries, list):
@@ -223,9 +262,25 @@ def _validate_entry_inventory(target, record, content_root):
         seen.add(name)
         if not isinstance(item.get("exists"), bool):
             raise ValueError(f"restore point has invalid existence record for {name}")
+        kind = _candidate_kind(name) if schema_version == SNAPSHOT_VERSION else None
+        if kind is not None and item.get("kind") != kind:
+            raise ValueError(f"restore point has an invalid path kind for {name}")
         if not item["exists"]:
             if item.get("stored") is not None or item.get("object") is not None:
                 raise ValueError(f"restore point has invalid absent entry: {name}")
+            if kind == installer.TRANSACTION_SHARED_DIR and item.get("mode") is not None:
+                raise ValueError(f"absent restore point directory has a mode: {name}")
+            if kind is not None and kind != installer.TRANSACTION_SHARED_DIR \
+                    and item.get("mode") is not None:
+                raise ValueError(f"absent restore point path has directory metadata: {name}")
+            _safe_path(target, name)
+            continue
+        if kind == installer.TRANSACTION_SHARED_DIR:
+            mode = item.get("mode")
+            if (item.get("stored") is not None or item.get("object") is not None
+                    or isinstance(mode, bool) or not isinstance(mode, int)
+                    or not 0 <= mode <= 0o7777):
+                raise ValueError(f"restore point directory metadata is invalid for {name}")
             _safe_path(target, name)
             continue
         stored = item.get("stored")
@@ -237,6 +292,10 @@ def _validate_entry_inventory(target, record, content_root):
         if mode is None or stat.S_ISLNK(mode.st_mode) or not (
                 stat.S_ISREG(mode.st_mode) or stat.S_ISDIR(mode.st_mode)):
             raise ValueError(f"restore point content is missing or unsafe for {name}")
+        if kind == installer.TRANSACTION_FILE and not stat.S_ISREG(mode.st_mode):
+            raise ValueError(f"restore point file content is not a file for {name}")
+        if kind == installer.TRANSACTION_PRIVATE_TREE and not stat.S_ISDIR(mode.st_mode):
+            raise ValueError(f"restore point private tree is not a directory for {name}")
         if _object_digest(saved) != item.get("object"):
             raise ValueError(f"restore point content failed verification for {name}")
         _safe_path(target, name)
@@ -271,7 +330,8 @@ def _load(target, validate_content=True):
         record = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ValueError(f"restore point metadata is invalid: {exc}") from exc
-    if (not isinstance(record, dict) or record.get("schema_version") != SNAPSHOT_VERSION
+    if (not isinstance(record, dict) or record.get("schema_version") not in (
+                SNAPSHOT_LEGACY_VERSION, SNAPSHOT_VERSION)
             or record.get("state") != "committed" or not isinstance(record.get("entries"), list)
             or not isinstance(record.get("candidate_paths"), list)):
         raise ValueError("restore point has an unsupported format")
@@ -285,12 +345,16 @@ def _load(target, validate_content=True):
         raise ValueError("restore point ownership inventory is invalid")
     for name in owned["files"]:
         if _relative(name) not in (installer._allowed_file_names() | {
-                constants.MANIFEST_NAME, constants.INI_NAME, constants.LAUNCH_RECORD_NAME,
-                live.CMD_FILE, live.STATUS_FILE, live.LOG_FILE}):
+                constants.MANIFEST_NAME, constants.INI_NAME, constants.LAUNCH_RECORD_NAME}
+                | set(live.CONTROL_FILES)):
             raise ValueError(f"restore point ownership path is unsupported: {name}")
+        if not _candidate_covers(record, name):
+            raise ValueError(f"restore point ownership path is outside its captured inventory: {name}")
     for name in owned["dirs"]:
         if _relative(name) not in (installer._allowed_dir_names() | {constants.BACKUP_DIR}):
             raise ValueError(f"restore point ownership path is unsupported: {name}")
+        if not _candidate_covers(record, name):
+            raise ValueError(f"restore point owned directory is outside its captured inventory: {name}")
     if not isinstance(record.get("metadata"), dict):
         raise ValueError("restore point metadata payload is invalid")
     validate_metadata(record["metadata"])
@@ -346,21 +410,32 @@ def create(target_dir, metadata):
         entries = []
         for index, name in enumerate(candidates):
             source = _safe_path(target, name)
-            mode = _lstat(source)
-            item = {"path": name, "exists": mode is not None,
-                    "stored": None, "object": None}
-            if mode is not None:
-                if stat.S_ISLNK(mode.st_mode) or not (
-                        stat.S_ISREG(mode.st_mode) or stat.S_ISDIR(mode.st_mode)):
-                    raise ValueError(f"restore point cannot preserve unsafe path: {name}")
-                stored = f"{index:06d}"
-                destination = content_root / stored
-                if stat.S_ISDIR(mode.st_mode):
-                    _copy_tree(source, destination)
-                else:
-                    shutil.copy2(source, destination)
-                item["stored"] = stored
-                item["object"] = _object_digest(destination)
+            source_stat = _lstat(source)
+            kind = _candidate_kind(name)
+            item = {"path": name, "kind": kind, "exists": source_stat is not None}
+            if kind == installer.TRANSACTION_SHARED_DIR:
+                item["mode"] = (stat.S_IMODE(source_stat.st_mode)
+                                if source_stat is not None else None)
+                if source_stat is not None and not stat.S_ISDIR(source_stat.st_mode):
+                    raise ValueError(f"restore point shared path is not a directory: {name}")
+            else:
+                item.update(stored=None, object=None)
+                if source_stat is not None:
+                    if stat.S_ISLNK(source_stat.st_mode):
+                        raise ValueError(f"restore point cannot preserve unsafe path: {name}")
+                    if kind == installer.TRANSACTION_PRIVATE_TREE:
+                        if not stat.S_ISDIR(source_stat.st_mode):
+                            raise ValueError(f"restore point private path is not a directory: {name}")
+                    elif not stat.S_ISREG(source_stat.st_mode):
+                        raise ValueError(f"restore point file path is not a regular file: {name}")
+                    stored = f"{index:06d}"
+                    destination = content_root / stored
+                    if kind == installer.TRANSACTION_PRIVATE_TREE:
+                        _copy_tree(source, destination)
+                    else:
+                        shutil.copy2(source, destination)
+                    item["stored"] = stored
+                    item["object"] = _object_digest(destination)
             entries.append(item)
 
         record = {
@@ -400,7 +475,8 @@ def _load_staged(root):
         content_root = Path(root) / "entries"
         if content_root.is_symlink() or not content_root.is_dir():
             return None
-        _validate_entry_inventory(Path(root).parent, record, content_root)
+        _validate_entry_inventory(Path(root).parent, record, content_root,
+                                  accept_legacy=False)
         return record
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -424,6 +500,10 @@ def _candidate_source(snapshot, record, name):
         raise ValueError(f"restore point does not contain the candidate path: {name}")
     if not item["exists"]:
         return False, None
+    if item.get("kind") == "shared_dir":
+        if relative.parts:
+            return False, None
+        return True, item
     source = snapshot / "entries" / item["stored"] / relative
     try:
         mode = source.lstat().st_mode
@@ -467,6 +547,17 @@ def _restore_candidate_path(target, snapshot, record, name, backup_dir=False,
         destination.unlink()
         return True
 
+    if isinstance(source, dict) and source.get("kind") == "shared_dir":
+        if not directory_path:
+            raise ValueError(f"shared directory snapshot used for a file path: {name}")
+        if current is not None and not stat.S_ISDIR(current.st_mode):
+            raise ValueError(f"shared directory path changed type: {destination}")
+        if current is None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.mkdir()
+        os.chmod(destination, source["mode"])
+        return True
+
     source_mode = source.lstat().st_mode
     if stat.S_ISDIR(source_mode):
         if backup_dir:
@@ -500,8 +591,15 @@ def restore(target_dir):
     target = Path(target_dir).resolve()
     if not target.is_dir():
         raise NotADirectoryError(f"path does not exist: {target}")
+    # A restore point may replace a live ASI the user has changed since
+    # installation. Use the same known-build and renamed-copy checks as Remove
+    # before recovery or any other target mutation; an unknown canonical ASI
+    # blocks the complete rollback without changing its bytes.
+    installer.require_stopped_target(target)
+    installer._preflight_recovery_live_asi(target)
     installer.recover_target_transactions(target)
     installer.require_stopped_target(target)
+    installer._preflight_live_control(target, check_ini_paths=False)
     loaded = _load(target)
     if not loaded:
         return {"available": False, "restored": [], "metadata": {}}
@@ -544,13 +642,17 @@ def restore(target_dir):
     old_dirs = set(record["owned"]["dirs"])
     restore_files = current_files | old_files
     restore_dirs = current_dirs | old_dirs
+    new_owned_paths = {
+        name for name in current_files if not _candidate_covers(record, name)
+    }
+    snapshot_files = {name for name in restore_files if _candidate_covers(record, name)}
     old_runtime_paths = set(record.get("old_runtime_paths", []))
     restored = []
     with installer.target_transaction(target, require_stopped=True):
         # Restore every path owned on either side of the experiment. In
         # particular, restore newly adopted originals before replacing the old
         # backup tree, so no incremental original is lost with that tree.
-        ordered_files = sorted(restore_files, key=lambda name: (
+        ordered_files = sorted(snapshot_files, key=lambda name: (
             0 if name in old_runtime_paths else
             2 if name == constants.MANIFEST_NAME else
             1 if name.startswith(live.PLUGIN_SUBDIR + "/") else 0,
@@ -562,19 +664,39 @@ def restore(target_dir):
                 restored.append(name)
 
         # A game update can add a file after the restore point was captured and
-        # before a later import replaces it. Return that newly adopted original
-        # before the old private backup tree replaces the current one.
+        # before a later install adopts it. Return that newly adopted original
+        # before the old private backup tree replaces the current one. The
+        # legacy f9283 snapshot does not list the three newer control temp
+        # names, so their current manifest backup/ownership is the only
+        # permitted incremental evidence for those paths.
         for name in sorted(current_manifest.get("backups", {})):
             if name in prior_backups or name in installer._allowed_dir_names():
                 continue
-            existed, _ = _candidate_source(snapshot, record, name)
-            if existed:
-                continue
+            if _candidate_covers(record, name):
+                existed, _ = _candidate_source(snapshot, record, name)
+                if existed:
+                    continue
             stashed = _safe_path(target, f"{constants.BACKUP_DIR}/{name}")
             installer._require_path_type(stashed, directory=False, allow_missing=False)
             destination = _safe_path(target, name)
             installer.require_stopped_target(target)
             installer.atomic_copy(stashed, destination, target_dir=target)
+            restored.append(name)
+
+        # New files with explicit manifest ownership and no backup did not
+        # exist before this install. Remove only the exact regular file; an
+        # unexpected directory or symlink is left untouched and blocks restore.
+        for name in sorted(new_owned_paths):
+            if name in current_manifest.get("backups", {}):
+                continue
+            destination = _safe_path(target, name)
+            current = _lstat(destination)
+            if current is None:
+                continue
+            if not stat.S_ISREG(current.st_mode):
+                raise ValueError(f"refusing to remove an unverified new owned path: {destination}")
+            installer.require_stopped_target(target)
+            destination.unlink()
             restored.append(name)
 
         for name in sorted(restore_dirs - {constants.BACKUP_DIR},
@@ -593,9 +715,17 @@ def restore(target_dir):
         # only while it remains empty.
         plugin_dir = _safe_path(target, live.PLUGIN_SUBDIR)
         prior_plugins, prior_plugins_path = _candidate_source(snapshot, record, live.PLUGIN_SUBDIR)
-        if prior_plugins and stat.S_ISDIR(prior_plugins_path.lstat().st_mode):
+        if prior_plugins and isinstance(prior_plugins_path, dict):
+            plugin_mode = _lstat(plugin_dir)
+            if plugin_mode is None:
+                plugin_dir.mkdir(parents=True, exist_ok=True)
+            elif not stat.S_ISDIR(plugin_mode.st_mode):
+                raise ValueError(f"shared directory path changed type: {plugin_dir}")
+            os.chmod(plugin_dir, prior_plugins_path["mode"])
+        elif prior_plugins and stat.S_ISDIR(prior_plugins_path.lstat().st_mode):
             if not _lstat(plugin_dir):
                 plugin_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copystat(prior_plugins_path, plugin_dir)
         elif live.PLUGIN_SUBDIR in current_manifest.get("created_directories", []):
             if _lstat(plugin_dir) and stat.S_ISDIR(plugin_dir.lstat().st_mode) \
                     and not any(plugin_dir.iterdir()):

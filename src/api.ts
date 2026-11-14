@@ -9,6 +9,8 @@ import type {
   GameDetail,
   Library,
   LiveStatus,
+  LiveApplyResult,
+  LiveContext,
   OptipatcherStatus,
   ReframeworkStatus,
   MonitorReport,
@@ -176,9 +178,10 @@ export const uninstall = callable<[targetDir: string, removeIni: boolean], Actio
 );
 
 export const readConfig = callable<[targetDir: string], ConfigResult>("read_config");
-export const writeConfig = callable<[targetDir: string, changes: OptionChange[]], WriteConfigResult>(
-  "write_config"
-);
+export const writeConfig = callable<
+  [targetDir: string, changes: OptionChange[], pushLive?: boolean, liveContext?: LiveContext],
+  WriteConfigResult
+>("write_config");
 export const resetConfig = callable<[targetDir: string], ActionResult>("reset_config");
 
 export const getReframeworkStatus = callable<
@@ -204,9 +207,10 @@ export const installOptipatcher = callable<
 
 export const getLiveStatus = callable<[targetDir: string], LiveStatus>("get_live_status");
 export const installLive = callable<[targetDir: string], ActionResult>("install_live");
-export const switchUpscaler = callable<[targetDir: string, code: string], ActionResult>(
-  "switch_upscaler"
-);
+export const switchUpscaler = callable<
+  [targetDir: string, code: string, liveContext?: LiveContext],
+  ActionResult & { live?: LiveApplyResult }
+>("switch_upscaler");
 export const getLiveLog = callable<[targetDir: string, lines?: number], { lines: string[] }>(
   "get_live_log"
 );

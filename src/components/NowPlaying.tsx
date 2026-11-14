@@ -5,11 +5,13 @@ import { resolveGame } from "../shortcuts";
 import { useAutoPlan } from "../hooks/useAutoPlan";
 import { useConfig } from "../hooks/useConfig";
 import { useLiveStatus } from "../hooks/useLiveStatus";
+import { liveStatusMessage } from "../liveControl";
 import type { Game, GameDetail, RunningGame } from "../types";
 import { restartGame } from "../hooks/useRunningGame";
 import { BasicPanel } from "./BasicPanel";
 import { Centered, KeyValue, Notice, Pill } from "./Common";
 import { LiveStats } from "./LiveStats";
+import { LiveOutcome } from "./LiveOutcome";
 
 /**
  * The running game's controls, first thing on the page.
@@ -67,7 +69,10 @@ export function NowPlaying({
     `now-playing:${runningGame?.appid ?? "none"}`,
     { gamePath: detail?.path ?? "", appid: runningGame ? String(runningGame.appid) : null },
   );
-  const { status: live, refresh } = useLiveStatus(targetDir, Boolean(runningGame));
+  const { status: live, statusEpoch: liveStatusEpoch, refresh } = useLiveStatus(targetDir, Boolean(runningGame));
+  useEffect(() => config.reconcileLiveStatus(live, liveStatusEpoch), [
+    config.reconcileLiveStatus, live, liveStatusEpoch, config.livePending,
+  ]);
   const runtimeCurrent =
     detail?.install.runtime_current === true && config.runtimeCurrent === true;
   // Read-only here: whether a game is in automatic mode is decided where it is
@@ -117,6 +122,7 @@ export function NowPlaying({
   }
 
   const ffx = detail?.install.fsr4?.ffx;
+  const liveView = liveStatusMessage(live);
 
   return (
     <>
@@ -125,13 +131,7 @@ export function NowPlaying({
           <div style={{ padding: "2px 0" }}>
             <div style={{ marginBottom: "4px" }}>
               <Pill color="#2f6b3f">OptiScaler · {detail!.install.filename}</Pill>
-              {live?.supported !== true ? (
-                <Pill color="#5a4a20">live unavailable</Pill>
-              ) : live?.attached ? (
-                <Pill color="#2f6b3f">live</Pill>
-              ) : (
-                <Pill color="#5a4a20">not connected</Pill>
-              )}
+              <Pill color={liveView.ready ? "#2f6b3f" : "#5a4a20"}>live · {liveView.code}</Pill>
             </div>
             {/* The version OptiScaler's own FFX Settings box prints. */}
             {ffx?.version ? (
@@ -145,6 +145,7 @@ export function NowPlaying({
       </PanelSection>
 
       <LiveStats live={live} />
+      <LiveOutcome result={config.live} status={live} saving={config.saving} />
 
       {!runtimeCurrent ? (
         <PanelSection>
@@ -168,6 +169,9 @@ export function NowPlaying({
           live={live}
           ffx={ffx}
           targetDir={detail!.install.path}
+          liveResult={config.live}
+          onLiveResult={config.recordLiveAction}
+          onFlush={config.flush}
           plan={plan}
           auto={auto}
           onLiveChanged={() => void refresh()}
@@ -192,7 +196,7 @@ export function NowPlaying({
         </PanelSection>
       ) : null}
 
-      {config.dirty ? (
+      {config.restartRequired ? (
         <PanelSection>
           <PanelSectionRow>
             <Notice tone="warn" title="Restart the game to apply">

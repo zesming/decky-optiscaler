@@ -22,6 +22,7 @@ import {
   uninstall,
 } from "../api";
 import { setLaunchOptions } from "../hooks/useRunningGame";
+import { liveStatusMessage } from "../liveControl";
 import {
   currentLaunchOptions,
   hasOverride,
@@ -149,22 +150,8 @@ function shorten(path: string, keep = 3) {
  * nobody anywhere.
  */
 function liveReason(live: LiveStatus | null) {
-  if (!live) return "Live control has not reported in yet.";
-  if (live.supported !== true) {
-    return live.reason ?? "Live control is unavailable for this runtime. Settings are saved for the next launch.";
-  }
-  if (!live.asi_installed) {
-    return "The in-game plugin is not installed for this game. Add it under “Manual setup”.";
-  }
-  if (live.load_enabled === false) {
-    return "OptiScaler is not set to load .asi plugins, so the in-game plugin never ran.";
-  }
-  if (live.loaded_by_optiscaler === false) {
-    return "OptiScaler did not load the in-game plugin.";
-  }
-  return `OptiScaler loaded the in-game plugin, but it could not attach${
-    live.error ? `: ${live.error}` : "."
-  }`;
+  const state = liveStatusMessage(live);
+  return `${state.title}. ${state.detail}`;
 }
 
 /**
@@ -1522,13 +1509,13 @@ export function SetupChecklist({
           <PanelSectionRow>
             <Field
               label={
-                <StepLabel done={live?.supported === true && live.attached}>
-                  {live?.supported === true && live.attached ? "Running now" : "Running, without live control"}
+                <StepLabel done={liveStatusMessage(live).ready}>
+                  {liveStatusMessage(live).ready ? "Running now" : "Running, without live control"}
                 </StepLabel>
               }
               description={
-                live?.supported === true && live.attached
-                  ? `Live control connected. ${logSummary}`
+                liveStatusMessage(live).ready
+                  ? `Live control connected with verified capabilities. ${logSummary}`
                   : liveReason(live)
               }
               onClick={onLogs}

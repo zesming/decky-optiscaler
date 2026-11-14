@@ -5,15 +5,15 @@ import { resolveGame } from "../shortcuts";
 import { useAutoPlan } from "../hooks/useAutoPlan";
 import { useConfig } from "../hooks/useConfig";
 import { useLiveStatus } from "../hooks/useLiveStatus";
+import { liveStatusMessage } from "../liveControl";
 import { restartGame } from "../hooks/useRunningGame";
 import type { Game, GameDetail, LiveStatus, RunningGame } from "../types";
 import { BasicPanel } from "./BasicPanel";
 import { GamesList } from "./GamesList";
 import { LiveTiles } from "./LiveStats";
+import { LiveOutcome } from "./LiveOutcome";
 import { TabStrip } from "./TabStrip";
 import { Centered, Notice, Pill } from "./Common";
-import { MULTIPLIER_KEY, MULTIPLIER_SECTION, supportsMultiplier } from "../config/basic";
-import { curatedLabel } from "../config/labels";
 
 /**
  * The Quick Access panel: the plugin's front door, opened over a running game.
@@ -137,7 +137,10 @@ function NowPlayingTab({
   );
   // This tab is only ever shown over a running game, so the live channel is
   // always worth polling here.
-  const { status: live, refresh: refreshLive } = useLiveStatus(targetDir, Boolean(runningGame));
+  const { status: live, statusEpoch: liveStatusEpoch, refresh: refreshLive } = useLiveStatus(targetDir, Boolean(runningGame));
+  useEffect(() => config.reconcileLiveStatus(live, liveStatusEpoch), [
+    config.reconcileLiveStatus, live, liveStatusEpoch, config.livePending,
+  ]);
   const runtimeCurrent =
     detail?.install.runtime_current === true && config.runtimeCurrent === true;
   // Read-only over a running game: the mode is chosen on the full page, where
@@ -156,21 +159,12 @@ function NowPlayingTab({
     );
   }
 
-  // Only meaningful on the XeSS frame generator, which is the one that can do
-  // more than 2X; anywhere else it would be a number that means nothing.
-  const multiplier = supportsMultiplier(config.values)
-    ? config.values[MULTIPLIER_SECTION]?.[MULTIPLIER_KEY]
-    : null;
-  const fgSub = multiplier
-    ? curatedLabel(`${MULTIPLIER_SECTION}.${MULTIPLIER_KEY}`, multiplier)
-    : undefined;
-
   return (
     <>
       <PanelSection title={runningGame.name}>
         {installed ? (
           <PanelSectionRow>
-            <LiveTiles live={live} fgSub={fgSub} />
+            <LiveTiles live={live} />
           </PanelSectionRow>
         ) : null}
         <PanelSectionRow>
@@ -225,6 +219,8 @@ function NowPlayingTab({
             </PanelSection>
           ) : null}
 
+          <LiveOutcome result={config.live} status={live} saving={config.saving} />
+
           {!runtimeCurrent ? (
             <PanelSection>
               <PanelSectionRow>
@@ -247,6 +243,9 @@ function NowPlayingTab({
               live={live}
               ffx={detail.install.fsr4?.ffx}
               targetDir={detail.install.path}
+              liveResult={config.live}
+              onLiveResult={config.recordLiveAction}
+              onFlush={config.flush}
               plan={plan}
               auto={auto}
               compact
@@ -257,7 +256,7 @@ function NowPlayingTab({
             />
           )}
 
-          {config.dirty ? (
+          {config.restartRequired ? (
             <PanelSection>
               <PanelSectionRow>
                 <ButtonItem
@@ -309,15 +308,10 @@ function InstallPill({
 
 /** Whether the in-game plugin is answering, shown wherever the game is. */
 function LivePill({ live }: Readonly<{ live: LiveStatus | null }>) {
-  if (!live) return null;
-  if (live.supported !== true) return <Pill color="#5a4a20">live unavailable</Pill>;
-  if (live.attached) {
-    // An in-game plugin older than the one this build ships attaches and
-    // answers normally, so the only sign of it is what it leaves out. Say so
-    // here; the Setup tab's Logs page explains it and offers the reinstall.
-    if (live.asi_current === false) return <Pill color="#5a4a20">live · outdated</Pill>;
-    return <Pill color="#2f6b3f">live{live.can_switch_upscaler ? "" : " · fg only"}</Pill>;
-  }
-  if (!live.asi_installed) return <Pill color="#5a4a20">live control off</Pill>;
-  return <Pill color="#5a4a20">not connected</Pill>;
+  const state = liveStatusMessage(live);
+  if (state.ready) return <Pill color="#2f6b3f">live · ready</Pill>;
+  if (state.code === "old") return <Pill color="#5a4a20">live · old module</Pill>;
+  if (state.code === "unknown") return <Pill color="#5a4a20">live · unknown</Pill>;
+  if (state.code === "not-installed") return <Pill color="#5a4a20">live control off</Pill>;
+  return <Pill color="#5a4a20">live · {state.code}</Pill>;
 }

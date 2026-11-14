@@ -181,8 +181,9 @@ class Plugin:
     async def read_config(self, target_dir: str) -> dict:
         return await self.service.read_config(target_dir)
 
-    async def write_config(self, target_dir: str, changes: list) -> dict:
-        return await self.service.write_config(target_dir, changes)
+    async def write_config(self, target_dir: str, changes: list,
+                           push_live: bool = True, live_context: dict = None) -> dict:
+        return await self.service.write_config(target_dir, changes, push_live, live_context)
 
     async def reset_config(self, target_dir: str) -> dict:
         return await self.service.reset_config(target_dir)
@@ -194,8 +195,9 @@ class Plugin:
     async def install_live(self, target_dir: str) -> dict:
         return await self.service.install_live(target_dir)
 
-    async def switch_upscaler(self, target_dir: str, code: str) -> dict:
-        return await self.service.switch_upscaler(target_dir, code)
+    async def switch_upscaler(self, target_dir: str, code: str,
+                              live_context: dict = None) -> dict:
+        return await self.service.switch_upscaler(target_dir, code, live_context)
 
     async def get_live_log(self, target_dir: str, lines: int = 40) -> dict:
         return await self.service.get_live_log(target_dir, lines)

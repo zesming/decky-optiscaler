@@ -42,14 +42,14 @@ Object.assign(fixtures, {
 function makeDetail(path: string, savedLaunch: string | null, recorded = true, metadata: string | null = savedLaunch) {
   return {
     path, name: "Recovery Harness", target: `${path}/bin/x64`, target_is_saved: true,
-    candidates: [], ini_info: { present: true, legacy: false, keys: 1 }, wiki_entry: null,
+    candidates: [], ini_info: { present: true, directory_generation: "1", legacy: false, keys: 1 }, wiki_entry: null,
     fsr4_sources: [], gpu: { names: [], name: "Test GPU", gfx: null, vendor: "amd", generation: "RDNA2", fsr4: "unknown" },
     launch_option: "", writable: true,
     reframework: { required: false, installed: false, dll: "dinput8.dll", path: `${path}/bin/x64/dinput8.dll`,
       revision: null, managed: false, plugin: null, plugin_installed: false, plugin_url: null, plugin_name: null, complete: true },
     install: {
       path: `${path}/bin/x64`, installed: true, filename: "dxgi.dll", managed: true, version: "0.9.5",
-      runtime_current: true, installed_at: 1, ini_present: true, ini_path: `${path}/bin/x64/OptiScaler.ini`,
+      runtime_current: true, installed_at: 1, ini_present: true, directory_generation: "1", ini_path: `${path}/bin/x64/OptiScaler.ini`,
       log_present: false, log_path: "", candidates: ["dxgi.dll"], extra_proxies: [],
       backup_dir: `${path}/backup`, backed_up: ["dxgi.dll"],
       launch_record: { recorded, value: recorded ? savedLaunch ?? "" : "" },

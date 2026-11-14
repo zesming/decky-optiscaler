@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import stat
 import time
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from .constants import (
     LIVE_CONTROL_REASON,
     INI_NAME,
     OPTIPATCHER_NAME,
+    OPTIPATCHER_SHA256,
     OPTIPATCHER_VERSION,
     OPTISCALER_VERSION,
     PAYLOAD_ARCHIVE,
@@ -810,6 +812,15 @@ class OptiScalerService:
             payload_root = await self.ensure_payload()
             async with self._mutation_lock:
                 def work():
+                    live_source = self.live_asi_path()
+                    patcher_source = self.optipatcher_path() if optipatcher else None
+                    if optipatcher and not patcher_source:
+                        raise ValueError("This build does not bundle a usable OptiPatcher.")
+                    installer.preflight_install_sources(
+                        payload_root, live_source, ref_files, self.plugin_dir,
+                        patcher_source,
+                    )
+                    installer.recover_target_transactions(target_dir)
                     before = self.settings.snapshot_game(game_path) if game_path else None
                     existing = installer.read_manifest(target_dir) or {}
                     if game_path and existing.get("game_path") not in (None, game_path):
@@ -818,8 +829,8 @@ class OptiScalerService:
                         with installer.target_transaction(target_dir, require_stopped=True):
                             result = installer.install(
                                 target_dir, payload_root, filename, preserve_ini, self.log,
-                                None, self.optipatcher_path() if optipatcher else None,
-                                ref_files, ref_revision)
+                                live_source, patcher_source,
+                                ref_files, ref_revision, self.plugin_dir)
                             # Migrate only the changed option; preserve comments and every other value.
                             ini = IniFile(Path(target_dir) / INI_NAME)
                             value = str(ini.get("FSR", "Fsr4ForceEnableInt8", "auto")).lower()
@@ -829,9 +840,10 @@ class OptiScalerService:
                             changes = list(config_changes or [])
                             if not self.settings.get_pref(_experiment_key(game_path), False):
                                 changes += list(framegen_changes or [])
-                            if result.get("optipatcher", {}).get("installed"):
+                            if (result.get("live", {}).get("installed")
+                                    or result.get("optipatcher", {}).get("installed")):
                                 changes += live.ini_requirements()
-                            written = self._write_config_sync(target_dir, changes)
+                            written = self._write_config_sync(target_dir, changes, push_live=False)
                             if not written.get("ok") or written.get("rejected"):
                                 raise ValueError(written.get("error") or "Automatic settings were rejected")
                             result["applied"] = written.get("applied", [])
@@ -851,6 +863,11 @@ class OptiScalerService:
                             self.settings.restore_game(game_path, before)
                         raise
                 result = await self._run(work)
+            if (result.get("live", {}).get("installed")
+                    or result.get("optipatcher", {}).get("installed")):
+                result["asi_loading_enabled"] = await self._run(
+                    live.load_enabled, target_dir
+                )
             if ref_result["required"]:
                 installed = result.get("reframework", {})
                 ref_result["installed"] = bool(installed.get("installed"))
@@ -865,6 +882,7 @@ class OptiScalerService:
         try:
             async with self._mutation_lock:
                 def work():
+                    installer.recover_target_transactions(target_dir)
                     manifest = installer.read_manifest(target_dir) or {}
                     with installer.target_transaction(target_dir, extra_names=(restorepoint.RESTORE_DIR,), require_stopped=True):
                         result = installer.uninstall(target_dir, remove_ini, self.log)
@@ -894,87 +912,146 @@ class OptiScalerService:
 
         return await self._run(work)
 
-    @staticmethod
-    def _config_transaction(target_dir):
+    def _config_transaction(self, target_dir):
         from contextlib import contextmanager
-        import tempfile
-        import shutil
         @contextmanager
         def transaction():
-            destination = Path(target_dir) / INI_NAME
-            with tempfile.TemporaryDirectory(prefix=".decky-config-", dir=target_dir) as stage:
-                source = Path(stage) / INI_NAME
-                existed = destination.is_file()
-                if existed:
-                    shutil.copy2(destination, source)
-                try:
-                    yield
-                except Exception:
-                    if existed:
-                        installer.atomic_copy(source, destination)
-                    else:
-                        destination.unlink(missing_ok=True)
-                    raise
+            target = Path(target_dir).resolve()
+            installer.recover_target_transactions(target)
+            error = self._config_preflight_error(target, self.plugin_dir)
+            if error:
+                raise ValueError(error)
+            with installer.target_transaction(
+                    target, extra_names=(INI_NAME, installer.MANIFEST_NAME),
+                    include_known=False,
+                    intent=installer.TRANSACTION_INTENT_MANAGED_INI):
+                yield
         return transaction()
 
     @staticmethod
-    def _save_ini(ini):
+    def _config_preflight_error(target_dir, plugin_root=None):
+        """Check the managed config contract before creating a live-safe journal."""
+        target = Path(target_dir).resolve()
+        if not installer.read_manifest(target):
+            return "Set up this game with the plugin first so its original configuration can be restored."
+        if not installer.runtime_current(target):
+            return "Upgrade this game's OptiScaler runtime in Setup before editing settings."
+        ini_path = target / INI_NAME
+        mode = installer._existing_mode(ini_path)
+        if mode is None:
+            return "OptiScaler.ini not found"
+        if not stat.S_ISREG(mode):
+            raise ValueError(f"OptiScaler.ini is not a regular file: {ini_path}")
+        if installer._preflight_live_control(target, plugin_root=plugin_root):
+            return "Remove the legacy Decky live ASI by upgrading this game while it is stopped before changing settings."
+        return None
+
+    @staticmethod
+    def _save_ini(ini, plugin_root=None):
         import tempfile
-        with tempfile.TemporaryDirectory(prefix=".decky-ini-", dir=ini.path.parent) as stage:
+        import shutil
+        target = ini.path.parent.resolve()
+        active = getattr(installer._TRANSACTIONS, "targets", {}).get(str(target))
+        if active is None:
+            raise RuntimeError("INI save is outside an active managed transaction")
+        stage_root = Path(active["journal"]) / "ini-staging"
+        stage_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="change-", dir=stage_root) as stage:
             destination = ini.path
-            ini.path = Path(stage) / INI_NAME
+            staged_ini = Path(stage) / INI_NAME
             try:
+                shutil.copy2(destination, staged_ini)
+                ini.path = staged_ini
                 ini.save()
-                if installer._preflight_live_control(destination.parent, ini_path=ini.path):
-                    raise ValueError("Remove the legacy Decky live ASI before applying settings to this runtime.")
+                installer._preflight_live_control(destination.parent, ini_path=ini.path,
+                                                  plugin_root=plugin_root)
                 installer.atomic_copy(ini.path, destination)
             finally:
                 ini.path = destination
 
     @staticmethod
     def _save_manifest(target_dir, manifest):
-        import json
-        import tempfile
-        from .constants import MANIFEST_NAME
-        with tempfile.TemporaryDirectory(prefix=".decky-manifest-", dir=target_dir) as stage:
-            source = Path(stage) / MANIFEST_NAME
-            source.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-            installer.atomic_copy(source, Path(target_dir) / MANIFEST_NAME)
+        installer._atomic_json(Path(target_dir) / installer.MANIFEST_NAME, manifest)
 
-    def _write_config_sync(self, target_dir, changes):
-        if not installer.read_manifest(target_dir):
-            return {"ok": False, "error": "Set up this game with the plugin first so its original configuration can be restored."}
-        if not installer.runtime_current(target_dir):
-            return {"ok": False, "error": "Upgrade this game's OptiScaler runtime in Setup before editing settings."}
-        path = Path(target_dir) / INI_NAME
-        if not path.is_file():
-            return {"ok": False, "error": "OptiScaler.ini not found"}
-        ini = IniFile(path)
-        applied, rejected = [], []
-        for change in changes or []:
-            section, key = change.get("section"), change.get("key")
-            if not section or not key:
-                continue
-            value = "auto" if change.get("value") in (None, "") else str(change["value"])
-            meta = SCHEMA.get((section, key))
-            if not meta or not _valid(meta, value):
-                rejected.append({"section": section, "key": key, "value": value})
-                continue
-            ini.set(section, key, value)
-            applied.append({"section": section, "key": key, "value": value})
-        if rejected:
-            return {"ok": False, "error": "Some settings were rejected; nothing was written.",
-                    "applied": [], "rejected": rejected}
-        if applied:
-            self._save_ini(ini)
-        return {"ok": True, "applied": applied, "rejected": rejected, "written_at": time.time(),
-                "live": {"ok": True, "sent": False, "attached": False, "reason": LIVE_CONTROL_REASON,
-                         "deferred": applied}}
+    def _write_config_sync(self, target_dir, changes, push_live=False, live_context=None):
+        target = Path(target_dir).resolve()
+        active = getattr(installer._TRANSACTIONS, "targets", {})
+        if str(target) not in active:
+            installer.recover_target_transactions(target)
+        preflight_error = self._config_preflight_error(target, self.plugin_dir)
+        if preflight_error:
+            return {"ok": False, "error": preflight_error}
+        with installer.target_transaction(
+                target, extra_names=(INI_NAME, installer.MANIFEST_NAME),
+                include_known=False,
+                intent=installer.TRANSACTION_INTENT_MANAGED_INI):
+            # Recover first, then validate install/runtime/path ownership, then
+            # read and edit the INI. A stale journal must never reintroduce an
+            # older setting after this request has already been constructed.
+            preflight_error = self._config_preflight_error(target, self.plugin_dir)
+            if preflight_error:
+                raise ValueError(preflight_error)
+            path = Path(target) / INI_NAME
+            ini = IniFile(path)
+            applied, rejected = [], []
+            for change in changes or []:
+                section, key = change.get("section"), change.get("key")
+                if not section or not key:
+                    continue
+                value = "auto" if change.get("value") in (None, "") else str(change["value"])
+                meta = SCHEMA.get((section, key))
+                if not meta or not _valid(meta, value):
+                    rejected.append({"section": section, "key": key, "value": value})
+                    continue
+                ini.set(section, key, value)
+                entry = {"section": section, "key": key, "value": value}
+                if isinstance(change.get("live_context"), dict):
+                    entry["live_context"] = change["live_context"]
+                applied.append(entry)
+            if rejected:
+                return {"ok": False, "error": "Some settings were rejected; nothing was written.",
+                        "applied": [], "rejected": rejected}
+            if applied:
+                self._save_ini(ini, self.plugin_dir)
+        public_applied = [
+            {key: value for key, value in item.items() if key != "live_context"}
+            for item in applied
+        ]
+        applied_keys = [f"{item['section']}.{item['key']}" for item in applied]
+        live_changes = [item for item in applied if live.is_live_key(item["section"], item["key"])]
+        live_keys = [f"{item['section']}.{item['key']}" for item in live_changes]
+        if push_live and live_changes:
+            try:
+                live_result = live.apply_changes(
+                    target_dir, live_changes, live_context=live_context,
+                    source=self.live_asi_path(), plugin_root=self.plugin_dir,
+                )
+            except Exception as exc:
+                live_result = {
+                    "ok": False, "sent": False, "confirmed": False, "ack": None,
+                    "session": None, "seq": None,
+                    "accepted_keys": [], "sent_keys": [], "context": None,
+                    "deferred": live_keys,
+                    "failed_keys": [], "error": str(exc), "reason": str(exc),
+                }
+        else:
+            reason = None if push_live else "Live sending was disabled for this config write."
+            live_result = {
+                "ok": False, "sent": False, "confirmed": False, "ack": None,
+                "session": None, "seq": None,
+                "accepted_keys": [], "sent_keys": [], "context": None,
+                "deferred": live_keys,
+                "failed_keys": [], "error": None, "reason": reason,
+            }
+        return {"ok": True, "applied": public_applied, "rejected": rejected,
+                "written_at": time.time(), "live": live_result,
+                "persisted_keys": applied_keys}
 
-    async def write_config(self, target_dir, changes, push_live=True):
+    async def write_config(self, target_dir, changes, push_live=True, live_context=None):
         try:
             async with self._mutation_lock:
-                return await self._run(self._write_config_sync, target_dir, changes)
+                return await self._run(self._write_config_sync, target_dir, changes,
+                                       push_live, live_context)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -984,12 +1061,34 @@ class OptiScalerService:
             payload_root = Path(await self.ensure_payload())
 
             def work():
-                if not installer.read_manifest(target_dir) or not installer.runtime_current(target_dir):
-                    raise ValueError("Set up the game with this plugin before resetting settings.")
-                destination = Path(target_dir) / INI_NAME
-                if installer._preflight_live_control(target_dir, ini_path=payload_root / INI_NAME):
-                    raise ValueError("Remove the legacy Decky live ASI before resetting settings.")
-                installer.atomic_copy(payload_root / INI_NAME, destination)
+                target = Path(target_dir).resolve()
+                installer.recover_target_transactions(target)
+                preflight_error = self._config_preflight_error(target, self.plugin_dir)
+                if preflight_error:
+                    raise ValueError(preflight_error)
+                with installer.target_transaction(
+                        target, extra_names=(INI_NAME, installer.MANIFEST_NAME),
+                        include_known=False,
+                        intent=installer.TRANSACTION_INTENT_MANAGED_INI):
+                    preflight_error = self._config_preflight_error(target, self.plugin_dir)
+                    if preflight_error:
+                        raise ValueError(preflight_error)
+                    legacy_asi = installer._preflight_live_control(
+                        target, ini_path=payload_root / INI_NAME,
+                        plugin_root=self.plugin_dir
+                    )
+                    if legacy_asi:
+                        raise ValueError("Upgrade this game's legacy live ASI while it is stopped before resetting settings.")
+                    destination = Path(target) / INI_NAME
+                    original_mode = destination.stat().st_mode
+                    state = installer._TRANSACTIONS.targets[str(target)]
+                    stage_root = Path(state["journal"]) / "ini-staging"
+                    stage_root.mkdir(exist_ok=True)
+                    temporary = stage_root / "reset.ini"
+                    import shutil
+                    shutil.copy2(payload_root / INI_NAME, temporary)
+                    os.chmod(temporary, stat.S_IMODE(original_mode))
+                    installer.atomic_copy(temporary, destination)
                 return {"ok": True, "path": str(destination)}
 
             async with self._mutation_lock:
@@ -1003,7 +1102,16 @@ class OptiScalerService:
         if not LIVE_CONTROL_SUPPORTED:
             return None
         candidate = self.plugin_dir / "bin" / live.ASI_NAME
-        return str(candidate) if candidate.is_file() else None
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ValueError(f"Cannot inspect packaged live ASI: {exc}") from exc
+        # Only an absent optional component is offline-only. A symlink,
+        # directory, or corrupted artifact must reach validate_live_source and
+        # fail before any game-target recovery or mutation.
+        return str(candidate)
 
     def reframework_cache(self):
         """Where downloaded REFramework builds are kept between installs.
@@ -1098,15 +1206,27 @@ class OptiScalerService:
         try:
             async with self._mutation_lock:
                 def work():
+                    source = self.optipatcher_path() if enabled else None
+                    if enabled:
+                        if not source:
+                            raise ValueError("This build does not bundle OptiPatcher")
+                        source_path = Path(source)
+                        if source_path.is_symlink() or not source_path.is_file():
+                            raise FileNotFoundError(
+                                f"required install source missing or unsafe: {source_path}"
+                            )
+                        if installer._sha256_file(source_path) != OPTIPATCHER_SHA256:
+                            raise ValueError("The bundled OptiPatcher checksum does not match.")
+                    installer.recover_target_transactions(target_dir)
                     installer.require_stopped_install(target_dir)
                     with installer.target_transaction(target_dir, require_stopped=True):
                         relative = f"{live.PLUGIN_SUBDIR}/{OPTIPATCHER_NAME}"
                         if not enabled:
                             installer.remove_files(target_dir, [relative], self.log)
                         else:
-                            source = self.optipatcher_path()
-                            if not source:
-                                raise ValueError("This build does not bundle OptiPatcher")
+                            if installer._preflight_live_control(
+                                    target_dir, plugin_root=self.plugin_dir):
+                                raise ValueError("Upgrade this game's legacy live ASI while it is stopped before enabling OptiPatcher.")
                             # add_files accepts destination names through a relative source mapping.
                             installer.install_plugin_file(target_dir, source, relative, self.log)
                             written = self._write_config_sync(target_dir, live.ini_requirements())
@@ -1120,18 +1240,44 @@ class OptiScalerService:
     async def get_live_status(self, target_dir):
         """Whether settings can currently be changed without a restart."""
         source = self.live_asi_path()
-        report = await self._run(live.status, target_dir, source)
+        report = await self._run(live.status, target_dir, source, self.plugin_dir)
         report["asi_available"] = source is not None
-        report["supported"] = LIVE_CONTROL_SUPPORTED
-        report["reason"] = LIVE_CONTROL_REASON
-        report["live_keys"] = sorted(live.LIVE_FIELDS) if LIVE_CONTROL_SUPPORTED else []
         return report
 
     async def install_live(self, target_dir):
-        return {"ok": False, "error": LIVE_CONTROL_REASON}
+        source = self.live_asi_path()
+        if not source:
+            return {"ok": False, "error": "This package has no verified live-control ASI."}
+        try:
+            async with self._mutation_lock:
+                result = await self._run(
+                    installer.install_live_component, target_dir, source, self.log,
+                    self.plugin_dir,
+                )
+            result["asi_loading_enabled"] = await self._run(
+                live.load_enabled, target_dir
+            )
+            return {"ok": True, **result}
+        except Exception as exc:
+            self.log.exception("live-control install failed for %s", target_dir)
+            return {"ok": False, "error": str(exc)}
 
-    async def switch_upscaler(self, target_dir, code):
-        return {"ok": False, "error": LIVE_CONTROL_REASON}
+    async def switch_upscaler(self, target_dir, code, live_context=None):
+        try:
+            async with self._mutation_lock:
+                result = await self._run(
+                    live.switch_backend, target_dir, code, live_context,
+                    self.live_asi_path(), self.plugin_dir,
+                )
+            return {"ok": bool(result.get("confirmed")), "live": result,
+                    **({"error": result.get("error")} if not result.get("confirmed") else {})}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc),
+                    "live": {"ok": False, "sent": False, "confirmed": False,
+                             "ack": None, "session": None, "seq": None,
+                             "accepted_keys": [],
+                             "sent_keys": [], "context": None, "deferred": [],
+                             "failed_keys": [], "error": str(exc), "reason": str(exc)}}
 
     async def get_live_log(self, target_dir, lines=40):
         return {"lines": await self._run(live.log_tail, target_dir, lines)}

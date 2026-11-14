@@ -373,10 +373,14 @@ export function ffxUpscalerChanges(
  * as off until the game selects frame generation in its own options, and the
  * two rates then measure the same frames and come out equal. That is worth
  * saying rather than hiding — equal numbers with nothing to explain them read
- * as a broken readout.
+ * as a broken readout. An interval-only telemetry sample returns no pair at
+ * all; `livePresentPathFps` reports its presented path separately.
  */
 export function liveFrameRates(live: LiveStatus | null | undefined) {
   if (!live?.fg_enabled) return null;
+  // Interval-only samples (notably Wine) support a present-path reading, but
+  // cannot identify an FG multiplier or total generated rate.
+  if (live.telemetry_source === "core_intervals") return null;
   const number = (value: number | null | undefined) =>
     typeof value === "number" && value > 0 ? value : null;
   // The counter alone does not say which of the two rates it counted, so the
@@ -389,20 +393,49 @@ export function liveFrameRates(live: LiveStatus | null | undefined) {
   return { total, base, generating: base !== null && base < total * 0.95 };
 }
 
+/** Present-path FPS from a fresh interval-only sample, never an FG total. */
+export function livePresentPathFps(live: LiveStatus | null | undefined): number | null {
+  if (
+    !live ||
+    live.telemetry_ready !== true ||
+    live.telemetry_source !== "core_intervals" ||
+    typeof live.present_path_fps !== "number" ||
+    !Number.isFinite(live.present_path_fps) ||
+    live.present_path_fps <= 0
+  ) return null;
+  return live.present_path_fps;
+}
+
+/** The runtime FFX FG version, using only the game's observed active index. */
+export function liveFfxFgLabel(live: LiveStatus | null | undefined): string | null {
+  const index = live?.fg_index;
+  const version = typeof index === "number" && index >= 0
+    ? live?.ffx_fg_versions?.[index]
+    : undefined;
+  return version ? `FFX FG ${version}` : null;
+}
+
 /** The backend the running game ended up with, in the order it reports them. */
 export function runningBackend(live: LiveStatus | null | undefined): string | null {
-  return live?.upscaler?.dx12 ?? live?.upscaler?.vulkan ?? live?.upscaler?.dx11 ?? null;
+  if (!live?.upscaler) return null;
+  switch (live.active_api) {
+    case "dx11": return live.upscaler.dx11;
+    case "vulkan": return live.upscaler.vulkan;
+    case "dx12": return live.upscaler.dx12;
+    default: return null;
+  }
 }
 
 /**
  * What to call the upscaler the running game ended up with.
  *
  * The backend id alone cannot be specific — "fsr31" is FSR 2.3.4 through 4.1.1
- * and OptiScaler names it "FSR 3.X/4" for exactly that reason. The version the
- * game actually built is in its own reported list, at the index Config holds,
- * and OptiScaler's overlay prints it the same way: "FSR " and the SDK's own
- * name. Falls back to the backend's name when there is no list to read, which
- * is every non-FidelityFX upscaler and any game that has not queried the SDK.
+ * and OptiScaler names it "FSR 3.X/4" for exactly that reason. The active
+ * version is in the game's reported list, at the index observed from its
+ * running state, and OptiScaler's overlay prints it the same way: "FSR " and
+ * the SDK's own name. Falls back to the backend's name when there is no list to
+ * read, which is every non-FidelityFX upscaler and any game that has not queried
+ * the SDK.
  */
 export function liveUpscalerLabel(live: LiveStatus | null | undefined): string | null {
   const backend = runningBackend(live);

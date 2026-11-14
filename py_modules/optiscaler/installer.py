@@ -8,6 +8,7 @@ backup folder, so an uninstall can put the game back exactly as it was.
 
 import json
 import os
+import re
 import shutil
 import stat
 import threading
@@ -22,6 +23,7 @@ from . import constants, fsr4build, live, schema
 from .inifile import IniFile
 from .constants import (
     OPTIPATCHER_NAME,
+    OPTIPATCHER_SHA256,
     BACKUP_DIR,
     FFX_UPSCALER_DLL,
     FSR4_MIN_SDK_VERSION,
@@ -51,7 +53,16 @@ TRANSACTION_RETIRING_PREFIX = ".decky-optiscaler-tx-cleanup-"
 TRANSACTION_COPY_PREFIX = ".decky-optiscaler-copy-"
 RESTOREPOINT_STAGING_PREFIX = ".decky-restorepoint-"
 TRANSACTION_RECORD = "journal.json"
-TRANSACTION_VERSION = 1
+TRANSACTION_LEGACY_VERSION = 1
+TRANSACTION_VERSION = 2
+TRANSACTION_FILE = "file"
+TRANSACTION_SHARED_DIR = "shared_dir"
+TRANSACTION_PRIVATE_TREE = "private_tree"
+TRANSACTION_INTENT_STOPPED = "stopped"
+TRANSACTION_INTENT_NORMAL = "normal"
+TRANSACTION_INTENT_MANAGED_INI = "managed_ini"
+TRANSACTION_INTENTS = {TRANSACTION_INTENT_NORMAL, TRANSACTION_INTENT_STOPPED,
+                       TRANSACTION_INTENT_MANAGED_INI}
 
 _TRANSACTIONS = threading.local()
 
@@ -61,7 +72,7 @@ def _allowed_file_names():
     return (set(PROXY_FILENAMES) | set(PAYLOAD_FILES) | set(FSR4_SUPPORT_FILES)
             | set(RUNTIME_ARTIFACTS) | {INI_NAME, LOG_NAME, REFRAMEWORK_DLL,
                                        "remove_optiscaler.sh",
-                                       live.CMD_FILE, live.STATUS_FILE, live.LOG_FILE,
+                                       *live.CONTROL_FILES,
                                        f"{live.PLUGIN_SUBDIR}/{live.ASI_NAME}",
                                        f"{live.PLUGIN_SUBDIR}/{OPTIPATCHER_NAME}"}
             | set(nested))
@@ -69,6 +80,24 @@ def _allowed_file_names():
 
 def _allowed_dir_names():
     return set(PAYLOAD_DIRS) | {"DlssOverrides", live.PLUGIN_SUBDIR}
+
+
+def _shared_dir_names():
+    names = set(_allowed_dir_names())
+    for name in _allowed_file_names():
+        parts = PurePosixPath(name).parts
+        names.update(PurePosixPath(*parts[:index]).as_posix()
+                     for index in range(1, len(parts)))
+    return names
+
+
+def _transaction_kind(name):
+    if name.casefold() in {BACKUP_DIR.casefold(), RESTORE_DIR.casefold()} or (
+            "/" not in name and name.startswith(RESTOREPOINT_STAGING_PREFIX)):
+        return TRANSACTION_PRIVATE_TREE
+    if name.casefold() in {item.casefold() for item in _shared_dir_names()}:
+        return TRANSACTION_SHARED_DIR
+    return TRANSACTION_FILE
 
 
 def _payload_nested_names(payload_root=None):
@@ -207,10 +236,50 @@ def _assert_plain_tree(root):
 
 
 def _merge_directory_tree(source, destination, target_dir=None, replace_files=None):
-    """Restore a backed-up directory while preserving unrelated new files."""
+    """Restore pinned originals and missing legacy files without clobbering additions."""
     source, destination = Path(source), Path(destination)
     game_target = Path(target_dir).resolve() if target_dir is not None else None
     replace_files = set(replace_files or ())
+    restore_files = set()
+    deferred_files = set()
+    needed_dirs = {"."}
+
+    _assert_plain_tree(source)
+    _require_path_type(destination, directory=True)
+    # Whole-directory backups are from old manifests that could have stashed
+    # user files alongside the bundled licenses. Return each missing file, but
+    # leave a later file at the same path untouched unless it is a known
+    # bundled path whose original is explicitly being restored.
+    for base, dirs, files in os.walk(source, followlinks=False):
+        relative = Path(base).relative_to(source)
+        relative_text = "." if not relative.parts else relative.as_posix()
+        needed_dirs.add(relative_text)
+        destination_dir = destination if relative_text == "." else destination / relative
+        if game_target is not None:
+            relative_dir = destination_dir.relative_to(game_target).as_posix()
+            _safe_path(game_target, relative_dir)
+        mode = _existing_mode(destination_dir)
+        if mode is not None and not stat.S_ISDIR(mode):
+            raise ValueError(f"directory backup collides with a non-directory: {destination_dir}")
+        for name in files:
+            relative_file = (relative / name).as_posix()
+            item = destination / relative / name
+            if game_target is not None:
+                relative_item = item.relative_to(game_target).as_posix()
+                item = _safe_path(game_target, relative_item)
+            current = _existing_mode(item)
+            if current is not None and not stat.S_ISREG(current):
+                raise ValueError(f"file backup collides with a non-file: {item}")
+            if relative_file in replace_files or current is None:
+                restore_files.add(relative_file)
+                parts = PurePosixPath(relative_file).parts
+                needed_dirs.update(PurePosixPath(*parts[:index]).as_posix()
+                                   for index in range(1, len(parts)))
+            else:
+                # Two valid regular files exist for this unknown legacy path.
+                # Keep the current target and retain the backup until the user
+                # resolves the ambiguity; silently deleting either would lose data.
+                deferred_files.add(relative_file)
 
     def make_merge_directory_writable(path):
         mode = _existing_mode(path)
@@ -220,33 +289,46 @@ def _merge_directory_tree(source, destination, target_dir=None, replace_files=No
             if writable != permissions:
                 os.chmod(path, writable)
 
-    _assert_plain_tree(source)
-    _require_path_type(destination, directory=True)
-    if _path_exists(destination):
-        _assert_plain_tree(destination)
-        make_merge_directory_writable(destination)
-    destination.mkdir(parents=True, exist_ok=True)
     directory_pairs = []
     for base, dirs, files in os.walk(source, followlinks=False):
         relative = Path(base).relative_to(source)
+        relative_text = "." if not relative.parts else relative.as_posix()
+        if relative_text not in needed_dirs:
+            dirs[:] = []
+            continue
         target_base = destination / relative
-        directory_pairs.append((Path(base), target_base))
+        mode = _existing_mode(target_base)
+        if mode is not None and not stat.S_ISDIR(mode):
+            raise ValueError(f"directory backup collides with a non-directory: {target_base}")
+        target_base.mkdir(parents=True, exist_ok=True)
         make_merge_directory_writable(target_base)
+        directory_pairs.append((Path(base), target_base))
         for name in dirs:
+            source_dir = Path(base) / name
+            source_relative = source_dir.relative_to(source).as_posix()
+            if source_relative not in needed_dirs:
+                continue
             item = target_base / name
             mode = _existing_mode(item)
             if mode is not None and not stat.S_ISDIR(mode):
                 raise ValueError(f"directory backup collides with a non-directory: {item}")
-            item.mkdir(exist_ok=True)
+            item.mkdir(parents=True, exist_ok=True)
             make_merge_directory_writable(item)
         for name in files:
             original = Path(base) / name
             item = target_base / name
+            relative_file = (relative / name).as_posix()
+            if relative_file not in restore_files:
+                continue
             mode = _existing_mode(item)
             if mode is not None and not stat.S_ISREG(mode):
                 raise ValueError(f"file backup collides with a non-file: {item}")
-            relative_file = (relative / name).as_posix()
-            if mode is not None and relative_file not in replace_files:
+            if game_target is not None:
+                # atomic_copy allocates its same-filesystem stage beside the
+                # destination and records that temporary in the active game
+                # transaction before publishing it. A hard exit therefore
+                # leaves a recoverable journal rather than an orphaned file.
+                atomic_copy(original, item, target_dir=game_target)
                 continue
             fd, temporary = tempfile.mkstemp(prefix=f".{item.name}.decky-restore-",
                                              dir=item.parent)
@@ -265,6 +347,7 @@ def _merge_directory_tree(source, destination, target_dir=None, replace_files=No
             require_stopped_target(game_target)
         if dest_dir.exists():
             shutil.copystat(source_dir, dest_dir, follow_symlinks=False)
+    return sorted(deferred_files)
 
 
 def _copy_path(source, destination):
@@ -283,8 +366,29 @@ def _copy_path(source, destination):
 
 def _atomic_json(path, data):
     path = Path(path)
-    fd, temporary = tempfile.mkstemp(prefix=".decky-optiscaler-manifest-",
-                                     dir=path.parent)
+    target = path.parent.resolve()
+    if path.name == MANIFEST_NAME and target.is_dir():
+        active = getattr(_TRANSACTIONS, "targets", {})
+        state = active.get(str(target))
+        if state is None:
+            with target_transaction(target, extra_names=(MANIFEST_NAME,), require_stopped=True):
+                return _atomic_json(path, data)
+        try:
+            current_mode = path.lstat().st_mode
+        except FileNotFoundError:
+            current_mode = None
+        if current_mode is not None and not stat.S_ISREG(current_mode):
+            raise ValueError(f"refusing to replace non-regular manifest: {path}")
+        stage_root = Path(state["journal"]) / "metadata-staging"
+        stage_root.mkdir(exist_ok=True)
+        temporary = stage_root / f"manifest-{uuid.uuid4().hex}"
+        temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        if current_mode is not None:
+            os.chmod(temporary, stat.S_IMODE(current_mode))
+        os.replace(temporary, path)
+        return
+
+    fd, temporary = tempfile.mkstemp(prefix=".decky-optiscaler-manifest-", dir=path.parent)
     os.close(fd)
     try:
         Path(temporary).write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -413,9 +517,10 @@ def _transaction_paths(target, extra_names=(), include_known=True):
         names.update({LAUNCH_RECORD_NAME, BACKUP_DIR, LOG_NAME,
                       "remove_optiscaler.sh", *PROXY_FILENAMES, *PAYLOAD_FILES,
                       *PAYLOAD_DIRS, *FSR4_SUPPORT_FILES, *RUNTIME_ARTIFACTS,
+                      *_payload_nested_names(), REFRAMEWORK_DLL,
                       "DlssOverrides", f"{live.PLUGIN_SUBDIR}/{live.ASI_NAME}",
                       f"{live.PLUGIN_SUBDIR}/{OPTIPATCHER_NAME}",
-                      live.CMD_FILE, live.STATUS_FILE, live.LOG_FILE})
+                      *live.CONTROL_FILES})
     manifest = read_manifest(target)
     if manifest and include_known:
         names.update(manifest.get("files", []))
@@ -427,53 +532,80 @@ def _transaction_paths(target, extra_names=(), include_known=True):
     for name in extra_names or ():
         names.add(_relative_name(name))
 
-    # Record any parent directory a nested file write may create. This also
-    # preserves unrelated ASIs if the user already has a plugins/ folder.
+    # Wine treats root-level managed names without case sensitivity. Snapshot
+    # an existing Linux spelling alongside the canonical name so a migration
+    # can stash and later restore that original byte-for-byte.
+    root_names = {name for name in names if "/" not in name}
+    if root_names:
+        try:
+            children = list(Path(target).iterdir())
+        except OSError as exc:
+            raise ValueError(f"Cannot inspect managed root paths: {exc}") from exc
+        for name in root_names:
+            matches = [item.name for item in children if item.name.casefold() == name.casefold()]
+            if len(matches) > 1:
+                raise ValueError(f"Multiple Wine-equivalent paths exist for managed name {name}.")
+            if matches:
+                names.add(matches[0])
+
+    # Record parent directories separately. Shared directories are restored by
+    # mode only; their files are tracked by exact managed path.
     for name in list(names):
         parts = PurePosixPath(_relative_name(name)).parts
         for index in range(1, len(parts)):
             names.add(PurePosixPath(*parts[:index]).as_posix())
-
-    normalized = sorted({_relative_name(name) for name in names})
-    # Snapshot an owning directory once rather than duplicating each child.
-    roots = set(normalized)
-    for name in normalized:
-        parts = PurePosixPath(name).parts
-        if any(PurePosixPath(*parts[:i]).as_posix() in roots
-               for i in range(1, len(parts))):
-            roots.discard(name)
-    return sorted(roots)
+    return sorted({_relative_name(name) for name in names})
 
 
-def _snapshot_into(target, journal, names, records):
+def _snapshot_into(target, journal, names, records, extra_dirs=()):
     entries = journal / "entries"
     entries.mkdir(parents=True, exist_ok=True)
     already = {record["name"] for record in records}
+    private_trees = {record["name"] for record in records
+                     if record.get("kind") == TRANSACTION_PRIVATE_TREE}
     for name in names:
         name = _relative_name(name)
         if name in already:
             continue
-        if any(name.startswith(existing + "/") for existing in already):
+        if any(name.startswith(existing + "/") for existing in private_trees):
             continue
         source = _safe_path(target, name)
-        record = {"name": name, "exists": False, "stored": None}
+        kind = (TRANSACTION_SHARED_DIR if name in extra_dirs
+                else _transaction_kind(name))
+        record = {"name": name, "kind": kind, "exists": False}
+        if kind == TRANSACTION_SHARED_DIR:
+            record["mode"] = None
+        else:
+            record["stored"] = None
         try:
             mode = source.lstat().st_mode
         except FileNotFoundError:
             records.append(record)
             already.add(name)
+            if kind == TRANSACTION_PRIVATE_TREE:
+                private_trees.add(name)
             continue
-        if stat.S_ISLNK(mode):
-            raise ValueError(f"managed transaction path is a symlink: {source}")
-        if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
-            raise ValueError(f"managed transaction path is a special file: {source}")
-        if name == BACKUP_DIR and not stat.S_ISDIR(mode):
-            raise ValueError(f"backup path is not a directory: {source}")
+        if kind == TRANSACTION_SHARED_DIR:
+            if not stat.S_ISDIR(mode):
+                raise ValueError(f"managed shared directory has an unexpected type: {source}")
+            record["mode"] = stat.S_IMODE(mode)
+            record["exists"] = True
+            records.append(record)
+            already.add(name)
+            continue
+        if kind == TRANSACTION_PRIVATE_TREE:
+            if not stat.S_ISDIR(mode):
+                raise ValueError(f"managed private tree has an unexpected type: {source}")
+            _assert_plain_tree(source)
+        elif not stat.S_ISREG(mode):
+            raise ValueError(f"managed transaction file has an unexpected type: {source}")
         record["exists"] = True
         record["stored"] = f"{len(records):06d}"
         _copy_path(source, entries / record["stored"])
         records.append(record)
         already.add(name)
+        if kind == TRANSACTION_PRIVATE_TREE:
+            private_trees.add(name)
 
 
 def _transaction_record(state, target, status="active"):
@@ -482,6 +614,7 @@ def _transaction_record(state, target, status="active"):
         "target": str(target),
         "status": status,
         "require_stopped": bool(state.get("require_stopped")),
+        "intent": state.get("intent", TRANSACTION_INTENT_NORMAL),
         "records": state["records"],
     }
 
@@ -491,107 +624,391 @@ def _persist_transaction(state, target, status="active"):
                  _transaction_record(state, target, status))
 
 
-def _restore_snapshot(target, journal, records, require_stopped):
+def _validate_casefold_transaction_aliases(records, canonical_names):
+    """Accept a single existing spelling, or two equivalent absent records."""
+    canonical = {name for name in canonical_names if "/" not in name}
+    groups = {}
+    for record in records:
+        name = _relative_name(record["name"])
+        groups.setdefault(name.casefold(), []).append(record)
+    for group in groups.values():
+        if len(group) == 1:
+            continue
+        if len(group) != 2 or any("/" in item["name"] for item in group):
+            raise ValueError("transaction repeats a Wine-equivalent path")
+        canonical_record = next(
+            (item for item in group if item["name"] in canonical), None
+        )
+        alias_record = next(
+            (item for item in group if item is not canonical_record), None
+        )
+        if (canonical_record is None or alias_record is None
+                or canonical_record["name"] == alias_record["name"]
+                or sum(item.get("exists") is True for item in group) > 1):
+            raise ValueError("transaction has conflicting Wine-equivalent paths")
+
+
+def _validate_managed_ini_records(target, journal, records, version=TRANSACTION_VERSION):
+    """Validate the whole running-config recovery plan before its first write."""
+    target = Path(target).resolve()
+    allowed_names = {INI_NAME, MANIFEST_NAME}
+    by_folded = {}
+    for record in records:
+        name = _relative_name(record["name"])
+        if version == TRANSACTION_VERSION and record.get("kind") != TRANSACTION_FILE:
+            raise ValueError(f"managed INI recovery contains a non-file record: {name}")
+        if "/" in name:
+            raise ValueError(f"managed INI recovery path is not at the game root: {name}")
+        folded = name.casefold()
+        copy_stage = folded.startswith(TRANSACTION_COPY_PREFIX.casefold())
+        if folded not in {item.casefold() for item in allowed_names} and not copy_stage:
+            raise ValueError(f"managed INI recovery contains an out-of-scope path: {name}")
+        if copy_stage and not re.fullmatch(
+                re.escape(TRANSACTION_COPY_PREFIX) + r"[0-9a-f]{32}", name,
+                flags=re.IGNORECASE):
+            raise ValueError(f"managed INI recovery has an invalid staging name: {name}")
+        by_folded.setdefault(folded, []).append(record)
+
+        destination = _safe_path(target, name)
+        current = _existing_mode(destination)
+        if current is not None and not stat.S_ISREG(current):
+            raise ValueError(f"managed INI recovery target is not a regular file: {destination}")
+        if copy_stage and record.get("exists"):
+            raise ValueError(f"managed INI staging was not absent at transaction start: {name}")
+        if record.get("exists"):
+            saved = Path(journal) / "entries" / str(record.get("stored"))
+            try:
+                saved_mode = saved.lstat().st_mode
+            except OSError as exc:
+                raise ValueError(f"managed INI recovery content is missing: {name}") from exc
+            if not stat.S_ISREG(saved_mode):
+                raise ValueError(f"managed INI recovery content is not a regular file: {name}")
+        elif record.get("stored") is not None:
+            raise ValueError(f"managed INI absent record has content: {name}")
+
+    _validate_casefold_transaction_aliases(records, allowed_names)
+    ini_record = next((item for item in by_folded.get(INI_NAME.casefold(), [])
+                       if item.get("exists")), None)
+    manifest_record = next((item for item in by_folded.get(MANIFEST_NAME.casefold(), [])
+                            if item.get("exists")), None)
+    if not ini_record or not ini_record.get("exists"):
+        raise ValueError("managed INI recovery has no original OptiScaler.ini")
+    if not manifest_record or not manifest_record.get("exists"):
+        raise ValueError("managed INI recovery has no original install manifest")
+
+
+def _restore_snapshot(target, journal, records, require_stopped, intent=None):
+    intent = intent or TRANSACTION_INTENT_STOPPED
+    if intent == TRANSACTION_INTENT_MANAGED_INI:
+        _validate_managed_ini_records(target, journal, records)
+    _validate_transaction_records(target, journal, records, intent,
+                                  version=TRANSACTION_VERSION)
     if require_stopped:
         require_stopped_target(target)
     staging_root = journal / "restore-staging"
     staging_root.mkdir(exist_ok=True)
-    # Rebuild directories from the immutable journal before replacing target
-    # paths. A retry after interruption uses the same source bytes and mapping.
-    ordered = sorted(records, key=lambda item: len(PurePosixPath(item["name"]).parts))
+    # Restore parent metadata before exact files. Private trees are deliberately
+    # the only records whose whole contents are replaced.
+    def restore_order(item):
+        depth = len(PurePosixPath(item["name"]).parts)
+        kind = item.get("kind")
+        if kind == TRANSACTION_SHARED_DIR and item["exists"]:
+            return 0, depth
+        if kind == TRANSACTION_SHARED_DIR:
+            return 2, -depth
+        return 1, depth
+
+    ordered = sorted(records, key=restore_order)
     for index, record in enumerate(ordered):
         if require_stopped:
             require_stopped_target(target)
         destination = _safe_path(target, record["name"])
-        if not record["exists"]:
-            _remove_path(destination)
+        kind = record["kind"]
+        current_mode = _existing_mode(destination)
+        if kind == TRANSACTION_SHARED_DIR:
+            if current_mode is not None and not stat.S_ISDIR(current_mode):
+                raise ValueError(f"shared directory changed type during recovery: {destination}")
+            if not record["exists"]:
+                if current_mode is not None:
+                    try:
+                        empty = not any(destination.iterdir())
+                    except OSError:
+                        empty = False
+                    if empty:
+                        destination.rmdir()
+                continue
+            if current_mode is None:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.mkdir(mode=record["mode"] | 0o300)
+            else:
+                writable_mode = stat.S_IMODE(current_mode) | 0o300
+                if writable_mode != stat.S_IMODE(current_mode):
+                    os.chmod(destination, writable_mode)
             continue
-        saved = journal / "entries" / record["stored"]
-        saved_mode = saved.lstat().st_mode
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if stat.S_ISDIR(saved_mode):
-            staged = staging_root / f"{index:06d}"
+
+        if kind == TRANSACTION_PRIVATE_TREE:
+            if current_mode is not None and not stat.S_ISDIR(current_mode):
+                raise ValueError(f"private recovery tree changed type: {destination}")
+            if not record["exists"]:
+                if current_mode is not None:
+                    _remove_path(destination)
+                continue
+            saved = journal / "entries" / record["stored"]
+            staged = staging_root / f"new-{index:06d}"
+            old = staging_root / f"old-{index:06d}"
             if _path_exists(staged):
                 _remove_path(staged)
+            if _path_exists(old):
+                _remove_path(old)
+            _copy_path(saved, staged)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if current_mode is not None:
+                os.replace(destination, old)
+            try:
+                os.replace(staged, destination)
+            except Exception:
+                if current_mode is not None and _path_exists(old):
+                    os.replace(old, destination)
+                raise
+            if _path_exists(old):
+                _remove_path(old)
+            continue
+
+        if not record["exists"]:
+            if current_mode is not None:
+                if not stat.S_ISREG(current_mode):
+                    raise ValueError(f"managed file changed type during recovery: {destination}")
+                destination.unlink()
+            continue
+        saved = journal / "entries" / record["stored"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        while True:
+            staged = destination.with_name(f"{TRANSACTION_COPY_PREFIX}{uuid.uuid4().hex}")
+            relative_stage = staged.relative_to(target).as_posix()
+            _safe_path(target, relative_stage)
+            if not _path_exists(staged):
+                break
+        _snapshot_into(target, journal, (relative_stage,), records)
+        _persist_transaction({"journal": journal, "records": records,
+                              "require_stopped": require_stopped,
+                              "intent": intent}, target)
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(descriptor)
+        try:
             _copy_path(saved, staged)
             if require_stopped:
                 require_stopped_target(target)
-            _remove_path(destination)
+            current = _existing_mode(destination)
+            if current is not None and not stat.S_ISREG(current):
+                raise ValueError(f"refusing to replace a non-file during recovery: {destination}")
+            if require_stopped:
+                require_stopped_target(target)
             os.replace(staged, destination)
-        else:
-            while True:
-                staged = destination.with_name(f"{TRANSACTION_COPY_PREFIX}{uuid.uuid4().hex}")
-                relative_stage = staged.relative_to(target).as_posix()
-                _safe_path(target, relative_stage)
-                if not _path_exists(staged):
-                    break
-            _snapshot_into(target, journal, (relative_stage,), records)
-            _persist_transaction({"journal": journal, "records": records,
-                                  "require_stopped": require_stopped}, target)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            os.close(descriptor)
-            try:
-                _copy_path(saved, staged)
-                if require_stopped:
-                    require_stopped_target(target)
-                _remove_path(destination)
-                if require_stopped:
-                    require_stopped_target(target)
-                os.replace(staged, destination)
-            finally:
-                staged.unlink(missing_ok=True)
+        finally:
+            staged.unlink(missing_ok=True)
+
+    for record in sorted(
+            (item for item in ordered
+             if item.get("kind") == TRANSACTION_SHARED_DIR and item["exists"]),
+            key=lambda item: len(PurePosixPath(item["name"]).parts), reverse=True):
+        destination = _safe_path(target, record["name"])
+        current = _existing_mode(destination)
+        if current is not None:
+            if not stat.S_ISDIR(current):
+                raise ValueError(f"shared directory changed type during recovery: {destination}")
+            os.chmod(destination, record["mode"])
 
 
-def _validate_transaction_records(target, journal, records):
+def _validate_transaction_records(target, journal, records, intent=None,
+                                  version=TRANSACTION_VERSION):
     if not isinstance(records, list):
         raise ValueError("transaction journal records are invalid")
-    seen = set()
     entries = Path(journal) / "entries"
     if entries.is_symlink() or not entries.is_dir():
         raise ValueError("transaction journal entries are missing or unsafe")
-    allowed = (_allowed_file_names() | _allowed_dir_names() | {
+    allowed = (_allowed_file_names() | _shared_dir_names() | {
         MANIFEST_NAME, LAUNCH_RECORD_NAME, BACKUP_DIR, RESTORE_DIR,
     })
     allowed_casefold = {name.casefold() for name in allowed}
+    stored_ids = set()
     for item in records:
         if not isinstance(item, dict) or not isinstance(item.get("name"), str):
             raise ValueError("transaction journal contains an invalid path record")
         name = _relative_name(item["name"])
         leaf = PurePosixPath(name).name
         copy_stage = leaf.casefold().startswith(TRANSACTION_COPY_PREFIX.casefold())
-        restorepoint_stage = leaf.casefold().startswith(RESTOREPOINT_STAGING_PREFIX.casefold())
+        restorepoint_stage = ("/" not in name and
+                              name.casefold().startswith(RESTOREPOINT_STAGING_PREFIX.casefold()))
+        payload_tree_path = any(name.casefold().startswith(directory.casefold() + "/")
+                                for directory in PAYLOAD_DIRS)
         if (name.casefold() not in allowed_casefold
                 and _legacy_backup_target(name) is None
-                and not copy_stage and not restorepoint_stage):
+                and not copy_stage and not restorepoint_stage
+                and not payload_tree_path):
             raise ValueError(f"transaction journal contains an unsupported path: {name}")
         if restorepoint_stage and "/" in name:
             raise ValueError("restorepoint staging must be a root-level path")
-        if name.casefold() in seen:
-            raise ValueError(f"transaction journal repeats a path: {name}")
-        seen.add(name.casefold())
         if not isinstance(item.get("exists"), bool):
             raise ValueError(f"transaction journal has an invalid existence record: {name}")
         if (copy_stage or restorepoint_stage) and item["exists"]:
             raise ValueError(f"transaction staging path was not absent at start: {name}")
+        if version == TRANSACTION_LEGACY_VERSION:
+            kind = _transaction_kind(name)
+            if kind == TRANSACTION_SHARED_DIR:
+                raise ValueError(
+                    f"active version-1 shared directory snapshot is ambiguous: {name}"
+                )
+        elif version == TRANSACTION_VERSION:
+            kind = item.get("kind")
+            if kind not in (TRANSACTION_FILE, TRANSACTION_SHARED_DIR,
+                            TRANSACTION_PRIVATE_TREE):
+                raise ValueError(f"transaction journal has an invalid record kind: {name}")
+            if kind != _transaction_kind(name) and not (
+                    payload_tree_path and _transaction_kind(name) == TRANSACTION_FILE
+                    and kind == TRANSACTION_SHARED_DIR):
+                raise ValueError(f"transaction journal record kind does not match its path: {name}")
+        else:
+            raise ValueError("transaction journal has an unsupported version")
+
+        if kind == TRANSACTION_SHARED_DIR:
+            if item.get("stored") is not None:
+                raise ValueError(f"shared directory record contains a tree snapshot: {name}")
+            directory_mode = item.get("mode")
+            if item["exists"]:
+                if isinstance(directory_mode, bool) or not isinstance(directory_mode, int) \
+                        or not 0 <= directory_mode <= 0o7777:
+                    raise ValueError(f"shared directory mode is invalid: {name}")
+            elif directory_mode is not None:
+                raise ValueError(f"absent shared directory has a mode: {name}")
+            current = _existing_mode(_safe_path(target, name))
+            if current is not None and not stat.S_ISDIR(current):
+                raise ValueError(f"shared directory changed type: {name}")
+            continue
+
         if not item["exists"]:
             if item.get("stored") is not None:
                 raise ValueError(f"transaction journal has invalid absent record: {name}")
+            if version == TRANSACTION_VERSION and kind != TRANSACTION_SHARED_DIR \
+                    and item.get("mode") is not None:
+                raise ValueError(f"absent transaction path has directory metadata: {name}")
+            current = _existing_mode(_safe_path(target, name))
+            if current is not None and (
+                    (kind == TRANSACTION_FILE and not stat.S_ISREG(current))
+                    or (kind == TRANSACTION_PRIVATE_TREE and not stat.S_ISDIR(current))):
+                raise ValueError(f"transaction target changed type: {name}")
             continue
+
         stored = item.get("stored")
-        if not isinstance(stored, str) or not stored.isdigit():
+        if not isinstance(stored, str) or not stored.isdigit() or stored in stored_ids:
             raise ValueError(f"transaction journal has invalid content mapping: {name}")
+        stored_ids.add(stored)
         saved = entries / stored
-        if saved.is_symlink() or not (saved.is_file() or saved.is_dir()):
+        saved_mode = _existing_mode(saved)
+        if saved_mode is None or stat.S_ISLNK(saved_mode):
             raise ValueError(f"transaction journal content is missing or unsafe: {name}")
-        _safe_path(target, name)
+        if kind == TRANSACTION_PRIVATE_TREE:
+            if not stat.S_ISDIR(saved_mode):
+                raise ValueError(f"private tree snapshot is not a directory: {name}")
+            _assert_plain_tree(saved)
+            if version == TRANSACTION_VERSION and item.get("mode") is not None:
+                raise ValueError(f"private tree record contains directory metadata: {name}")
+        elif not stat.S_ISREG(saved_mode):
+            raise ValueError(f"transaction file snapshot is not a regular file: {name}")
+        current = _existing_mode(_safe_path(target, name))
+        if current is not None and (
+                (kind == TRANSACTION_FILE and not stat.S_ISREG(current))
+                or (kind == TRANSACTION_PRIVATE_TREE and not stat.S_ISDIR(current))):
+            raise ValueError(f"transaction target changed type: {name}")
+        if version == TRANSACTION_VERSION and kind != TRANSACTION_PRIVATE_TREE \
+                and item.get("mode") is not None:
+            raise ValueError(f"transaction file record contains directory metadata: {name}")
+    _validate_casefold_transaction_aliases(
+        records, allowed | {MANIFEST_NAME, LAUNCH_RECORD_NAME, BACKUP_DIR, RESTORE_DIR}
+    )
+    if intent == TRANSACTION_INTENT_MANAGED_INI:
+        _validate_managed_ini_records(target, journal, records, version)
+
+
+def _preflight_live_asi_identity(target, live_asi=None, plugin_root=None,
+                                 allow_plugin_alias=False):
+    """Check only the ASI namespace; config and mailbox aliases are journaled separately."""
+    target = Path(target).resolve()
+    plugin_dir = _casefold_root_child(
+        target, live.PLUGIN_SUBDIR, "plugins directory", allow_alias=allow_plugin_alias
+    )
+    if _path_exists(plugin_dir):
+        _require_path_type(plugin_dir, directory=True, allow_missing=False)
+    if live_asi is not None:
+        live.validate_live_source(live_asi, plugin_root)
+    if not _path_exists(plugin_dir):
+        return False
+    if plugin_dir.is_symlink() or not plugin_dir.is_dir():
+        raise ValueError("Cannot safely inspect the default OptiScaler plugins directory.")
+
+    expected = {
+        getattr(constants, "LEGACY_LIVE_ASI_SHA256", ""),
+        live.known_asi_sha256(plugin_root),
+    }
+    if live_asi is not None:
+        try:
+            expected.add(_sha256_file(live_asi))
+        except OSError as exc:
+            raise ValueError(f"Cannot inspect packaged live ASI: {exc}") from exc
+    expected.discard(None)
+    expected.discard("")
+    found_legacy = False
+    for entry in plugin_dir.iterdir():
+        if entry.suffix.casefold() != ".asi":
+            continue
+        mode = entry.lstat().st_mode
+        if not stat.S_ISREG(mode):
+            raise ValueError(f"Cannot safely inspect ASI plugin: {entry}")
+        try:
+            actual_hash = _sha256_file(entry)
+        except OSError as exc:
+            raise ValueError(f"Cannot inspect ASI plugin {entry}: {exc}") from exc
+        canonical = entry.name.casefold() == live.ASI_NAME.casefold()
+        if canonical:
+            if entry.name != live.ASI_NAME:
+                raise ValueError(
+                    f"Cannot safely upgrade through noncanonical live ASI name: {entry.name}."
+                )
+            if actual_hash not in expected:
+                raise ValueError(
+                    f"Cannot safely upgrade because {entry.name} has unknown bytes."
+                )
+            found_legacy = found_legacy or actual_hash == getattr(
+                constants, "LEGACY_LIVE_ASI_SHA256", ""
+            )
+        elif actual_hash in expected:
+            raise ValueError(
+                f"Cannot safely upgrade because a renamed live ASI may load: {entry.name}."
+            )
+    return found_legacy
+
+
+def _preflight_recovery_live_asi(target):
+    """Refuse an unknown live ASI before recovery or transaction writes begin."""
+    _preflight_live_asi_identity(target, allow_plugin_alias=True)
+
+
+def _upgrade_v1_transaction_records(records):
+    upgraded = []
+    for record in records:
+        item = dict(record)
+        item["kind"] = _transaction_kind(_relative_name(item["name"]))
+        upgraded.append(item)
+    return upgraded
 
 
 def recover_target_transactions(target_dir):
     """Retry any interrupted target operation before allowing a new mutation."""
     target = Path(target_dir).resolve()
+    if not target.is_dir():
+        return []
+    _preflight_recovery_live_asi(target)
     active = getattr(_TRANSACTIONS, "targets", {})
-    if str(target) in active or not target.is_dir():
+    if str(target) in active:
         return []
 
     recovered = []
@@ -621,23 +1038,50 @@ def recover_target_transactions(target_dir):
             record = json.loads(record_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise RuntimeError(f"transaction journal is invalid: {path}: {exc}") from exc
-        if (not isinstance(record, dict) or record.get("version") != TRANSACTION_VERSION
+        version = record.get("version") if isinstance(record, dict) else None
+        if (not isinstance(record, dict) or version not in (
+                    TRANSACTION_LEGACY_VERSION, TRANSACTION_VERSION)
                 or record.get("target") != str(target)
                 or record.get("status") not in ("active", "committed")
                 or not isinstance(record.get("require_stopped"), bool)
                 or not isinstance(record.get("records"), list)):
             raise RuntimeError(f"transaction journal has an unsupported format: {path}")
+        intent = record.get("intent")
+        if intent is None:
+            # Version-1 journals written before intent existed retain the
+            # original stop-game guard. This is the only legacy interpretation.
+            intent = (TRANSACTION_INTENT_STOPPED if record["require_stopped"]
+                      else TRANSACTION_INTENT_NORMAL)
+        if intent not in TRANSACTION_INTENTS or (
+                intent == TRANSACTION_INTENT_MANAGED_INI and record["require_stopped"]):
+            raise RuntimeError(f"transaction journal has an unsupported intent: {path}")
+        # Running-game recovery is limited to the explicitly scoped managed
+        # INI transaction. Version-1 journals without an intent, and any
+        # ordinary journal that claims require_stopped=false, must not use that
+        # disk bit to authorize recovery of binaries, directories or controls.
+        recovery_requires_stopped = intent != TRANSACTION_INTENT_MANAGED_INI
         if record["status"] == "committed":
             _retire_transaction(path, target)
             recovered.append({"path": path.name, "action": "cleaned"})
             continue
         try:
-            _validate_transaction_records(target, path, record["records"])
+            _validate_transaction_records(target, path, record["records"], intent,
+                                          version=version)
         except ValueError as exc:
             raise RuntimeError(f"transaction journal has unsafe mappings: {path}: {exc}") from exc
-        _restore_snapshot(target, path, record["records"], record["require_stopped"])
-        _persist_transaction({"journal": path, "records": record["records"],
-                              "require_stopped": record["require_stopped"]},
+        records = (_upgrade_v1_transaction_records(record["records"])
+                   if version == TRANSACTION_LEGACY_VERSION else record["records"])
+        state = {"journal": path, "records": records,
+                 "require_stopped": recovery_requires_stopped,
+                 "intent": intent}
+        if version == TRANSACTION_LEGACY_VERSION:
+            # Publish the typed, already-validated map before restoring target
+            # paths. A later crash resumes with the same narrow semantics.
+            _persist_transaction(state, target)
+        _restore_snapshot(target, path, records, recovery_requires_stopped, intent)
+        _persist_transaction({"journal": path, "records": records,
+                              "require_stopped": recovery_requires_stopped,
+                              "intent": intent},
                              target, status="committed")
         _retire_transaction(path, target)
         recovered.append({"path": path.name, "action": "rolled_back"})
@@ -661,7 +1105,8 @@ def _retire_transaction(journal, target):
 
 
 @contextmanager
-def target_transaction(target_dir, extra_names=(), require_stopped=False, include_known=True):
+def target_transaction(target_dir, extra_names=(), require_stopped=False,
+                       include_known=True, intent=None, extra_dirs=()):
     """Journal known target assets and restore them if a mutation raises.
 
     Nested calls on the same thread share the outer journal. Callers that may
@@ -671,17 +1116,61 @@ def target_transaction(target_dir, extra_names=(), require_stopped=False, includ
     target = Path(target_dir).resolve()
     if not target.is_dir():
         raise NotADirectoryError(f"install target does not exist: {target}")
+    extra_names = ((extra_names,) if isinstance(extra_names, str)
+                   else tuple(extra_names or ()))
+    extra_dirs = ((extra_dirs,) if isinstance(extra_dirs, str)
+                  else tuple(extra_dirs or ()))
+    if intent is None:
+        intent = TRANSACTION_INTENT_STOPPED if require_stopped else TRANSACTION_INTENT_NORMAL
+    if intent not in TRANSACTION_INTENTS:
+        raise ValueError(f"unsupported transaction intent: {intent}")
+    if intent == TRANSACTION_INTENT_MANAGED_INI and require_stopped:
+        raise ValueError("managed INI transactions cannot weaken a stopped-game guard")
+    if intent == TRANSACTION_INTENT_MANAGED_INI and include_known:
+        raise ValueError("managed INI transactions must use the restricted path inventory")
+    if intent == TRANSACTION_INTENT_MANAGED_INI:
+        if any(_relative_name(name) not in (INI_NAME, MANIFEST_NAME)
+               for name in extra_names):
+            raise ValueError("managed INI transaction includes an out-of-scope path")
+        if extra_dirs:
+            raise ValueError("managed INI transaction cannot include directory paths")
+    explicit_dirs = {_relative_name(name) for name in (extra_dirs or ())}
+    for name in extra_names or ():
+        parts = PurePosixPath(_relative_name(name)).parts
+        explicit_dirs.update(PurePosixPath(*parts[:index]).as_posix()
+                             for index in range(1, len(parts)))
+    _preflight_recovery_live_asi(target)
     active = getattr(_TRANSACTIONS, "targets", None)
     if active is None:
         active = _TRANSACTIONS.targets = {}
     key = str(target)
     state = active.get(key)
     if state:
-        names = _transaction_paths(target, extra_names, include_known)
+        if state.get("intent") == TRANSACTION_INTENT_MANAGED_INI and intent not in (
+                TRANSACTION_INTENT_MANAGED_INI, TRANSACTION_INTENT_STOPPED):
+            raise ValueError("nested transaction cannot widen a managed INI transaction")
+        names = sorted(set(_transaction_paths(target, extra_names, include_known))
+                       | explicit_dirs)
+        state.setdefault("extra_dirs", set()).update(explicit_dirs)
         if require_stopped:
             require_stopped_target(target)
-        _snapshot_into(target, state["journal"], names, state["records"])
+        _snapshot_into(target, state["journal"], names, state["records"],
+                       state["extra_dirs"])
         state["require_stopped"] = state["require_stopped"] or require_stopped
+        if (state.get("intent") == TRANSACTION_INTENT_STOPPED
+                or state["require_stopped"] or intent == TRANSACTION_INTENT_STOPPED):
+            state["intent"] = TRANSACTION_INTENT_STOPPED
+        elif (state.get("intent") == TRANSACTION_INTENT_NORMAL
+              or intent == TRANSACTION_INTENT_NORMAL):
+            # A scoped config transaction nested under an ordinary owner must
+            # not relabel the outer journal. Its existing broader inventory
+            # still needs stopped-game recovery after a hard exit.
+            state["intent"] = TRANSACTION_INTENT_NORMAL
+        elif (state.get("intent") == TRANSACTION_INTENT_MANAGED_INI
+              or intent == TRANSACTION_INTENT_MANAGED_INI):
+            state["intent"] = TRANSACTION_INTENT_MANAGED_INI
+        else:
+            state["intent"] = TRANSACTION_INTENT_NORMAL
         _persist_transaction(state, target)
         state["depth"] += 1
         try:
@@ -691,17 +1180,20 @@ def target_transaction(target_dir, extra_names=(), require_stopped=False, includ
         return
 
     recover_target_transactions(target)
-    names = _transaction_paths(target, extra_names, include_known)
+    names = sorted(set(_transaction_paths(target, extra_names, include_known))
+                   | explicit_dirs)
     if require_stopped:
         require_stopped_target(target)
     preparing = Path(tempfile.mkdtemp(prefix=TRANSACTION_PREPARING_PREFIX, dir=target))
     journal = target / f"{TRANSACTION_PREFIX}{uuid.uuid4().hex}"
     state = {"journal": preparing, "records": [], "depth": 1,
-             "require_stopped": bool(require_stopped)}
+             "extra_dirs": explicit_dirs,
+             "require_stopped": bool(require_stopped), "intent": intent}
     # Snapshot failures occur before the body can mutate anything. Remove only
     # the preparation directory and do not run rollback against a partial map.
     try:
-        _snapshot_into(target, preparing, names, state["records"])
+        _snapshot_into(target, preparing, names, state["records"],
+                       state["extra_dirs"])
         _persist_transaction(state, target)
         os.replace(preparing, journal)
         state["journal"] = journal
@@ -714,7 +1206,8 @@ def target_transaction(target_dir, extra_names=(), require_stopped=False, includ
         yield
     except BaseException as operation_error:
         try:
-            _restore_snapshot(target, journal, state["records"], state["require_stopped"])
+            _restore_snapshot(target, journal, state["records"],
+                              state["require_stopped"], state.get("intent"))
         except Exception as rollback_error:
             raise RuntimeError(
                 f"operation failed and rollback could not finish; recovery journal remains at {journal}: "
@@ -722,20 +1215,48 @@ def target_transaction(target_dir, extra_names=(), require_stopped=False, includ
             ) from operation_error
         try:
             _persist_transaction(state, target, status="committed")
-            _retire_transaction(journal, target)
-        except OSError as cleanup_error:
+        except Exception as commit_error:
             raise RuntimeError(
-                f"operation rolled back but transaction journal cleanup failed at {journal}: {cleanup_error}"
+                f"operation rolled back but its journal could not be marked complete at {journal}: "
+                f"{commit_error}"
             ) from operation_error
+        try:
+            _retire_transaction(journal, target)
+        except OSError:
+            # The rollback is complete and recorded. A later operation only
+            # needs to remove this committed journal.
+            pass
         raise
     else:
         try:
             _persist_transaction(state, target, status="committed")
+        except Exception as commit_error:
+            try:
+                _restore_snapshot(target, journal, state["records"],
+                                  state["require_stopped"], state.get("intent"))
+            except Exception as rollback_error:
+                raise RuntimeError(
+                    f"transaction commit marker failed and rollback could not finish; "
+                    f"recovery journal remains at {journal}: {rollback_error}"
+                ) from commit_error
+            try:
+                _persist_transaction(state, target, status="committed")
+            except Exception as rollback_mark_error:
+                raise RuntimeError(
+                    f"transaction commit marker failed; changes were rolled back but the "
+                    f"journal needs recovery at {journal}: {rollback_mark_error}"
+                ) from commit_error
+            try:
+                _retire_transaction(journal, target)
+            except OSError:
+                pass
+            raise RuntimeError("transaction commit marker failed; changes were rolled back") from commit_error
+        try:
             _retire_transaction(journal, target)
-        except OSError as cleanup_error:
-            raise RuntimeError(
-                f"operation committed but transaction journal cleanup failed at {journal}: {cleanup_error}"
-            ) from cleanup_error
+        except OSError:
+            # The mutation is committed. Leave the marker for a later
+            # cleanup-only recovery, and let the caller report the saved data.
+            pass
     finally:
         active.pop(key, None)
 
@@ -776,12 +1297,19 @@ def record_launch_options(target_dir, options, logger=None):
     """
     target = Path(target_dir).resolve()
     recover_target_transactions(target)
+    active = getattr(_TRANSACTIONS, "targets", {})
+    state = active.get(str(target))
+    if state is None:
+        with target_transaction(target, extra_names=(LAUNCH_RECORD_NAME,), require_stopped=True):
+            return record_launch_options(target, options, logger)
     path = launch_record_path(target)
     existing = read_launch_record(target)
     if existing["recorded"]:
         return {**existing, "written": False}
     text = options or ""
-    fd, temporary = tempfile.mkstemp(prefix=".decky-launch-options-", dir=target)
+    stage_root = Path(state["journal"]) / "launch-staging"
+    stage_root.mkdir(exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix="record-", dir=stage_root)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
@@ -819,8 +1347,14 @@ def _assert_known_live_asi(path):
         return
     if path.is_symlink() or not path.is_file():
         raise ValueError("Cannot safely remove the existing live-control ASI: its file type is unknown.")
-    expected = getattr(constants, "LEGACY_LIVE_ASI_SHA256", "")
-    if not expected or _sha256_file(path) != expected:
+    digest = _sha256_file(path)
+    expected = {
+        getattr(constants, "LEGACY_LIVE_ASI_SHA256", ""),
+        live.known_asi_sha256(),
+    }
+    expected.discard(None)
+    expected.discard("")
+    if digest not in expected:
         raise ValueError(
             "Cannot safely remove plugins/decky_optiscaler_live.asi because its bytes are unknown."
         )
@@ -982,16 +1516,30 @@ def import_fsr4_files(target_dir, source_dir, logger=None):
     source = Path(source_dir)
     if not target.is_dir():
         raise NotADirectoryError(f"install target does not exist: {target}")
-    if not source.is_dir():
+    try:
+        source_mode = source.lstat().st_mode
+    except OSError as exc:
+        raise NotADirectoryError(f"source folder does not exist or cannot be inspected: {source}") from exc
+    if stat.S_ISLNK(source_mode) or not stat.S_ISDIR(source_mode):
         raise NotADirectoryError(f"source folder does not exist: {source}")
-    recover_target_transactions(target)
-
-    names = [n for n in FSR4_SUPPORT_FILES if (source / n).is_file()]
+    names = []
+    for name in FSR4_SUPPORT_FILES:
+        candidate = source / name
+        try:
+            mode = candidate.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+            raise FileNotFoundError(f"FSR4 support source is not a regular file: {candidate}")
+        names.append(name)
     if not names:
         raise FileNotFoundError(
             f"no FSR4 support files ({', '.join(FSR4_SUPPORT_FILES)}) in {source}"
         )
 
+    # Validate every requested source before an old target journal can be
+    # recovered. Invalid input must never cause writes to the game directory.
+    recover_target_transactions(target)
     require_stopped_target(target)
     with target_transaction(target, require_stopped=True):
         manifest = read_manifest(target)
@@ -1077,7 +1625,12 @@ def atomic_copy(source, destination, target_dir=None):
         if str(target) not in active:
             with target_transaction(target, extra_names=(relative,), require_stopped=True):
                 return atomic_copy(source, destination, target_dir=target)
-        require_stopped_target(target)
+        state = active[str(target)]
+        if state.get("intent") == TRANSACTION_INTENT_MANAGED_INI:
+            if relative != INI_NAME:
+                raise ValueError("managed INI transaction cannot replace another game file")
+        else:
+            require_stopped_target(target)
     try:
         mode = destination.lstat().st_mode
     except FileNotFoundError:
@@ -1108,7 +1661,7 @@ def atomic_copy(source, destination, target_dir=None):
         if source.is_symlink() or not source.is_file():
             raise FileNotFoundError(f"copy source is not a regular file: {source}")
         shutil.copy2(source, name)
-        if target_dir is not None:
+        if target_dir is not None and active[str(target)].get("intent") != TRANSACTION_INTENT_MANAGED_INI:
             require_stopped_target(target_dir)
         os.replace(name, destination)
     finally:
@@ -1307,8 +1860,7 @@ def install_plugin_file(target_dir, source, relative="plugins/OptiPatcher.asi", 
         raise FileNotFoundError(f"missing {source}")
 
     recover_target_transactions(target)
-    if _preflight_live_control(target):
-        raise ValueError("Remove the legacy Decky live ASI before enabling another ASI plugin.")
+    _preflight_live_control(target)
     require_stopped_target(target)
     with target_transaction(target, require_stopped=True):
         manifest = read_manifest(target)
@@ -1457,7 +2009,7 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
-def _casefold_root_child(target, name, description):
+def _casefold_root_child(target, name, description, allow_alias=False):
     """Resolve a root child while rejecting Linux names that alias under Wine."""
     target = Path(target)
     try:
@@ -1466,7 +2018,7 @@ def _casefold_root_child(target, name, description):
         raise ValueError(f"Cannot safely inspect {description}: {exc}") from exc
     if len(matches) > 1:
         raise ValueError(f"Cannot safely inspect multiple Wine-equivalent {description} paths.")
-    if matches and matches[0].name != name:
+    if matches and matches[0].name != name and not allow_alias:
         raise ValueError(f"Cannot safely inspect noncanonical {description} path: {matches[0].name}.")
     return matches[0] if matches else target / name
 
@@ -1493,11 +2045,14 @@ def _simple_ini_values(path):
     return values
 
 
-def _preflight_live_control(target, ini_path=None):
-    """Validate the effective search path and identify a removable old ASI.
+def _preflight_live_control(target, ini_path=None, live_asi=None,
+                            plugin_root=None, check_ini_paths=True,
+                            reject_command_alias=False):
+    """Validate live paths and refuse unknown or renamed versions of our ASI.
 
-    ``ini_path`` can be a caller's staged final INI, allowing config edits to
-    receive the same check before they are atomically published.
+    ``ini_path`` can be a caller's staged final INI. A known 0.9.4 ASI is
+    upgradeable while the game is stopped; anything else under our canonical
+    name, or a renamed copy of either known build, is refused.
     """
     target = Path(target).resolve()
     installed_ini = _casefold_root_child(target, INI_NAME, "OptiScaler INI")
@@ -1507,53 +2062,153 @@ def _preflight_live_control(target, ini_path=None):
     if _path_exists(plugin_dir):
         _require_path_type(plugin_dir, directory=True, allow_missing=False)
 
-    effective_ini = Path(ini_path) if ini_path is not None else installed_ini
-    if _path_exists(effective_ini):
-        _require_path_type(effective_ini, directory=False, allow_missing=False)
-    settings = _simple_ini_values(effective_ini) if _path_exists(effective_ini) else {}
-    plugin_path = (settings.get(("plugins", "path"), "") or "").strip().strip('"').casefold()
-    dll_path = (settings.get(("libraries", "optidllpath"), "") or "").strip().strip('"').casefold()
-
-    if plugin_path not in ("", "auto"):
-        raise ValueError(
-            "Cannot upgrade OptiScaler while Plugins.Path is custom; restore the default plugin path first."
-        )
-    if dll_path not in ("", "auto"):
-        raise ValueError(
-            "Cannot upgrade OptiScaler while Libraries.OptiDllPath is custom; restore it to auto first."
-        )
-    if getattr(constants, "LIVE_CONTROL_SUPPORTED", False):
-        return None
-
-    known_hash = getattr(constants, "LEGACY_LIVE_ASI_SHA256", "")
-    if not _path_exists(plugin_dir):
-        return False
-    if plugin_dir.is_symlink() or not plugin_dir.is_dir():
-        raise ValueError("Cannot safely inspect the default OptiScaler plugins directory.")
-
-    found_standard = False
-    for entry in plugin_dir.iterdir():
-        if entry.suffix.casefold() != ".asi":
-            continue
-        mode = entry.lstat().st_mode
-        if not stat.S_ISREG(mode):
-            raise ValueError(f"Cannot safely inspect ASI plugin: {entry}")
-        try:
-            actual_hash = _sha256_file(entry)
-        except OSError as exc:
-            raise ValueError(f"Cannot inspect ASI plugin {entry}: {exc}") from exc
-        if actual_hash != known_hash:
-            if entry.name.casefold() == live.ASI_NAME.casefold():
-                raise ValueError(
-                    f"Cannot upgrade OptiScaler because {entry.name} has unknown bytes."
-                )
-            continue
-        if entry.name != live.ASI_NAME:
+    if check_ini_paths:
+        effective_ini = Path(ini_path) if ini_path is not None else installed_ini
+        if _path_exists(effective_ini):
+            _require_path_type(effective_ini, directory=False, allow_missing=False)
+        settings = _simple_ini_values(effective_ini) if _path_exists(effective_ini) else {}
+        plugin_path = (settings.get(("plugins", "path"), "") or "").strip().strip('"').casefold()
+        dll_path = (settings.get(("libraries", "optidllpath"), "") or "").strip().strip('"').casefold()
+        if plugin_path not in ("", "auto"):
             raise ValueError(
-                f"Cannot upgrade OptiScaler because a renamed legacy live ASI may load: {entry.name}."
+                "Cannot upgrade OptiScaler while Plugins.Path is custom; restore the default plugin path first."
             )
-        found_standard = True
-    return found_standard
+        if dll_path not in ("", "auto"):
+            raise ValueError(
+                "Cannot upgrade OptiScaler while Libraries.OptiDllPath is custom; restore it to auto first."
+            )
+
+    control_paths = {}
+    for name in live.CONTROL_FILES:
+        path = _casefold_root_child(
+            target, name, f"live-control file {name}",
+            allow_alias=not (reject_command_alias and name in (
+                live.CMD_FILE, live.CMD_TEMP_FILE,
+            )),
+        )
+        mode = _existing_mode(path)
+        if mode is not None and not stat.S_ISREG(mode):
+            raise ValueError(f"Cannot safely inspect live-control path: {path}")
+        control_paths[name] = path
+
+    return _preflight_live_asi_identity(
+        target, live_asi, plugin_root, allow_plugin_alias=False
+    )
+
+
+def _prepare_live_control_paths(target, backups, old_files, logger=None):
+    """Preserve initial control files and clear stale owned runtime state."""
+    target = Path(target).resolve()
+    old_folded = {str(name).casefold() for name in old_files}
+    backup_folded = {str(name).casefold() for name in backups}
+    for name in live.CONTROL_FILES:
+        path = _casefold_root_child(target, name, f"live-control file {name}", allow_alias=True)
+        if not _path_exists(path):
+            continue
+        mode = path.lstat().st_mode
+        if not stat.S_ISREG(mode):
+            raise ValueError(f"Cannot safely preserve live-control path: {path}")
+        relative = path.relative_to(target).as_posix()
+        if relative.casefold() not in old_folded and relative.casefold() not in backup_folded:
+            backups[relative] = _stash(target, path, logger)
+            backup_folded.add(relative.casefold())
+            continue
+        require_stopped_target(target)
+        path.unlink()
+
+
+def install_live_component(target_dir, source, logger=None, plugin_root=None):
+    """Install or upgrade only the verified live-control ASI."""
+    target = Path(target_dir).resolve()
+    source = Path(source)
+    if not target.is_dir():
+        raise NotADirectoryError(f"install target does not exist: {target}")
+    info = live.validate_live_source(source, plugin_root)
+    recover_target_transactions(target)
+    manifest = read_manifest(target)
+    if not manifest:
+        raise ValueError("Install OptiScaler with this plugin before adding live control.")
+    if not runtime_current(target):
+        raise ValueError("Upgrade this game's OptiScaler core before installing live control.")
+    _backup_items(target, manifest)
+    _preflight_live_control(target, live_asi=source, plugin_root=plugin_root)
+
+    live_rel = f"{live.PLUGIN_SUBDIR}/{live.ASI_NAME}"
+    with target_transaction(target, extra_names=live.CONTROL_FILES, require_stopped=True):
+        require_stopped_target(target)
+        manifest = read_manifest(target)
+        if not manifest:
+            raise ValueError("Install OptiScaler with this plugin before adding live control.")
+        if not runtime_current(target):
+            raise ValueError("Upgrade this game's OptiScaler core before installing live control.")
+        _preflight_live_control(target, live_asi=source, plugin_root=plugin_root)
+        files = list(manifest.get("files") or [])
+        backups = dict(manifest.get("backups") or {})
+        dirs = list(manifest.get("dirs") or [])
+        created_dirs = list(manifest.get("created_directories") or [])
+        asi = _safe_path(target, live_rel)
+        plugins = _safe_path(target, live.PLUGIN_SUBDIR)
+        plugins_existed = _path_exists(plugins)
+        if plugins_existed and not stat.S_ISDIR(plugins.lstat().st_mode):
+            raise ValueError(f"plugins path is not a regular directory: {plugins}")
+        if not plugins_existed and live.PLUGIN_SUBDIR not in created_dirs:
+            created_dirs.append(live.PLUGIN_SUBDIR)
+        if _path_exists(asi) and live_rel not in files and live_rel not in backups:
+            backups[live_rel] = _stash(target, asi, logger)
+        _prepare_live_control_paths(target, backups, set(files), logger)
+        atomic_copy(source, asi, target_dir=target)
+
+        # The load option is part of the install and shares its original INI
+        # backup with the rest of OptiScaler. Preserve comments and line endings.
+        ini_path = _safe_path(target, INI_NAME)
+        if not _path_exists(ini_path) or not stat.S_ISREG(ini_path.lstat().st_mode):
+            raise ValueError("OptiScaler.ini is missing or unsafe; live control was not installed.")
+        if INI_NAME not in files and INI_NAME not in backups:
+            backups[INI_NAME] = _stash(target, ini_path, logger)
+            atomic_copy(_safe_path(target, f"{BACKUP_DIR}/{INI_NAME}"), ini_path,
+                        target_dir=target)
+        transaction_state = getattr(_TRANSACTIONS, "targets", {}).get(str(target))
+        if not transaction_state:
+            raise RuntimeError("live-control INI update is outside its target transaction")
+        stage_root = Path(transaction_state["journal"]) / "live-ini-staging"
+        stage_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="change-", dir=stage_root) as stage:
+            staged_ini = Path(stage) / INI_NAME
+            shutil.copy2(ini_path, staged_ini)
+            ini = IniFile(staged_ini)
+            for requirement in live.ini_requirements():
+                ini.set(requirement["section"], requirement["key"], requirement["value"])
+            ini.save()
+            _preflight_live_control(target, ini_path=staged_ini, live_asi=source,
+                                    plugin_root=plugin_root)
+            atomic_copy(staged_ini, ini_path, target_dir=target)
+        if not any(stage_root.iterdir()):
+            stage_root.rmdir()
+
+        for name in (live_rel, *live.CONTROL_FILES, INI_NAME):
+            if name not in files:
+                files.append(name)
+        if not plugins_existed and live.PLUGIN_SUBDIR not in dirs:
+            dirs.append(live.PLUGIN_SUBDIR)
+        manifest.update(
+            live_asi=True,
+            live_asi_sha256=info["sha256"],
+            live_build_id=info["build_id"],
+            live_profile_id=info["profile_id"],
+            live_schema=info["schema"],
+            live_core_sha256=constants.LIVE_CORE_SHA256,
+            files=files,
+            dirs=dirs,
+            backups=backups,
+            created_directories=created_dirs,
+        )
+        validate_manifest(manifest)
+        _atomic_json(_safe_path(target, MANIFEST_NAME), manifest)
+    if logger:
+        logger.info("installed schema-%s live control at %s", info["schema"], asi)
+    return {"ok": True, "installed": True, "path": str(asi),
+            "build_id": info["build_id"], "profile_id": info["profile_id"],
+            "schema": info["schema"], "sha256": info["sha256"]}
 
 
 def _remove_disabled_live_control(target, backups, old_files, logger=None):
@@ -1594,98 +2249,50 @@ def _payload_inventory(payload_root):
     return state
 
 
+def preflight_install_sources(payload_root, live_asi=None, reframework_files=None,
+                             plugin_root=None, optipatcher=None):
+    """Validate required external sources before target recovery can write."""
+    _payload_inventory(payload_root)
+    if live_asi is not None:
+        live.validate_live_source(live_asi, plugin_root)
+    for source in reframework_files or ():
+        source = Path(source)
+        if source.is_symlink() or not source.is_file():
+            raise FileNotFoundError(f"required install source missing or unsafe: {source}")
+    if optipatcher is not None:
+        source = Path(optipatcher)
+        if source.is_symlink() or not source.is_file():
+            raise FileNotFoundError(f"required install source missing or unsafe: {source}")
+        if plugin_root is not None and _sha256_file(source) != OPTIPATCHER_SHA256:
+            raise ValueError("The bundled OptiPatcher checksum does not match.")
+
+
 def _copy_payload_dir(source, destination):
-    """Overlay pinned payload files into a safe staged copy, then swap trees."""
+    """Overlay only pinned payload files without replacing their shared tree."""
     source, destination = Path(source), Path(destination)
     target = destination.parent.resolve()
     active = getattr(_TRANSACTIONS, "targets", {})
     if str(target) not in active:
         with target_transaction(target, extra_names=(destination.name,), require_stopped=True):
             return _copy_payload_dir(source, destination)
+    _assert_plain_tree(source)
+    from . import payload as runtime_payload
 
-    if not stat.S_ISDIR(source.lstat().st_mode):
-        raise ValueError(f"payload directory is not a real directory: {source}")
-    for base, dirs, files in os.walk(source, followlinks=False):
-        for name in dirs + files:
-            path = Path(base) / name
-            mode = path.lstat().st_mode
-            if stat.S_ISLNK(mode) or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
-                raise ValueError(f"payload directory contains an unsafe object: {path}")
-
-    destination_mode = None
-    try:
-        destination_mode = destination.lstat().st_mode
-    except FileNotFoundError:
-        pass
-    if destination_mode is not None and not stat.S_ISDIR(destination_mode):
-        raise ValueError(f"managed payload directory has an unexpected type: {destination}")
-    if destination_mode is not None:
-        for base, dirs, files in os.walk(destination, followlinks=False):
-            for name in dirs + files:
-                path = Path(base) / name
-                mode = path.lstat().st_mode
-                if stat.S_ISLNK(mode) or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
-                    raise ValueError(f"managed payload tree contains an unsafe object: {path}")
-
-    journal = active[str(target)]["journal"]
-    stage_parent = journal / "payload-staging"
-    stage_parent.mkdir(exist_ok=True)
-    stage = stage_parent / uuid.uuid4().hex
-    stage.mkdir()
-    staged_tree = stage / destination.name
-    moved_old = None
-    try:
-        if destination_mode is not None:
-            shutil.copytree(destination, staged_tree, symlinks=True, copy_function=shutil.copy2)
-            for base, dirs, files in os.walk(staged_tree, followlinks=False):
-                for name in dirs + files:
-                    path = Path(base) / name
-                    mode = path.lstat().st_mode
-                    if stat.S_ISLNK(mode) or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
-                        raise ValueError(f"managed payload tree changed during staging: {path}")
-        else:
-            staged_tree.mkdir()
-        for base, dirs, files in os.walk(source, followlinks=False):
-            relative = Path(base).relative_to(source)
-            staged_base = staged_tree / relative
-            for name in dirs:
-                staged_dir = staged_base / name
-                if staged_dir.exists() and not staged_dir.is_dir():
-                    raise ValueError(f"payload directory collides with an existing file: {staged_dir}")
-                staged_dir.mkdir(exist_ok=True)
-            for name in files:
-                src = Path(base) / name
-                dst = staged_base / name
-                if dst.exists() and dst.is_dir():
-                    raise ValueError(f"payload file collides with an existing directory: {dst}")
-                temporary = dst.with_name(f".{dst.name}.decky-copy-{uuid.uuid4().hex}")
-                shutil.copy2(src, temporary)
-                os.replace(temporary, dst)
-
-        require_stopped_target(target)
-        if destination_mode is not None:
-            moved_old = stage_parent / f"old-{uuid.uuid4().hex}"
-            os.replace(destination, moved_old)
-        try:
-            os.replace(staged_tree, destination)
-        except Exception:
-            if moved_old is not None and _path_exists(moved_old):
-                os.replace(moved_old, destination)
-                moved_old = None
-            raise
-        if moved_old is not None:
-            shutil.rmtree(moved_old)
-            moved_old = None
-    finally:
-        if moved_old is not None and _path_exists(moved_old) and not _path_exists(destination):
-            os.replace(moved_old, destination)
-        if stage.exists():
-            shutil.rmtree(stage)
+    source_root = source.parent
+    for name in runtime_payload.required_inventory()["files"]:
+        if not name.startswith(destination.name + "/"):
+            continue
+        source_file = source_root / name
+        destination_file = _safe_path(target, name)
+        mode = _existing_mode(destination_file)
+        if mode is not None and not stat.S_ISREG(mode):
+            raise ValueError(f"managed payload file has an unexpected type: {destination_file}")
+        atomic_copy(source_file, destination_file, target_dir=target)
 
 
 def install(target_dir, payload_root, filename=DEFAULT_PROXY, preserve_ini=True,
             logger=None, live_asi=None, optipatcher=None, reframework_files=None,
-            reframework_revision=None):
+            reframework_revision=None, plugin_root=None):
     """Copy OptiScaler into target_dir under the given proxy filename.
 
     ``live_asi`` is the path to the compiled live-control plugin; when given it
@@ -1711,15 +2318,17 @@ def install(target_dir, payload_root, filename=DEFAULT_PROXY, preserve_ini=True,
         raise NotADirectoryError(f"install target does not exist: {target}")
     if not os.access(target, os.W_OK):
         raise PermissionError(f"no write permission for {target}")
+    preflight_install_sources(payload, live_asi, reframework_files, plugin_root, optipatcher)
     recover_target_transactions(target)
     require_stopped_target(target)
-    _payload_inventory(payload)
     _reject_case_variant_proxies(target)
     source_dll = payload / "OptiScaler.dll"
 
     old_manifest = read_manifest(target) or {}
     _backup_items(target, old_manifest)
-    live_cleanup = _preflight_live_control(target)
+    _preflight_live_control(target, live_asi=live_asi, plugin_root=plugin_root)
+    if not live_asi and _path_exists(_safe_path(target, f"{live.PLUGIN_SUBDIR}/{live.ASI_NAME}")):
+        raise ValueError("Cannot upgrade this live-control install without the packaged bridge ASI.")
     previous = detect(target)
     selected_build = old_manifest.get("fsr4_build") or {}
     if selected_build:
@@ -1871,7 +2480,6 @@ def install(target_dir, payload_root, filename=DEFAULT_PROXY, preserve_ini=True,
             if destination_mode is not None and not stat.S_ISDIR(destination_mode):
                 raise ValueError(f"managed payload directory has an unexpected type: {destination}")
             if destination_mode is not None and name not in backups:
-                _assert_plain_tree(destination)
                 for relative in nested_payload_files:
                     if not relative.startswith(name + "/"):
                         continue
@@ -1927,18 +2535,19 @@ def install(target_dir, payload_root, filename=DEFAULT_PROXY, preserve_ini=True,
             ref_result["revision"] = old_manifest.get("reframework_revision")
 
         live_result = {"installed": False, "error": None}
-        if not getattr(constants, "LIVE_CONTROL_SUPPORTED", False):
-            live_result["error"] = getattr(
-                constants, "LIVE_CONTROL_REASON", "Live control is disabled for this runtime."
-            )
-            if logger:
-                logger.info("live control disabled: %s", live_result["error"])
-        elif live_asi:
-            outcome = live.install_asi(target, live_asi, logger)
-            live_result["installed"] = bool(outcome.get("ok"))
-            live_result["error"] = outcome.get("error")
-            if live_result["installed"]:
-                created.append(live_rel)
+        live_info = None
+        if live_asi:
+            live_info = live.validate_live_source(live_asi, plugin_root)
+            _prepare_live_control_paths(target, backups, old_files, logger)
+            place(live_asi, live_rel)
+            created.extend(name for name in live.CONTROL_FILES if name not in created)
+            live_result.update(installed=True, build_id=live_info["build_id"],
+                               profile_id=live_info["profile_id"],
+                               schema=live_info["schema"], sha256=live_info["sha256"])
+        else:
+            live_result["error"] = "The packaged bridge ASI is unavailable."
+        if logger and live_result.get("error"):
+            logger.info("live control unavailable: %s", live_result["error"])
 
         # Optional OptiPatcher is installed through the same ownership and
         # backup path as every other managed file. Existing ownership survives
@@ -1963,7 +2572,7 @@ def install(target_dir, payload_root, filename=DEFAULT_PROXY, preserve_ini=True,
             else:
                 created_directories.add(live.PLUGIN_SUBDIR)
 
-        files = [name for name in old_files if name not in stale_removed and name != live_rel]
+        files = [name for name in old_files if name not in stale_removed]
         for name in created:
             if name not in files:
                 files.append(name)
@@ -1977,7 +2586,7 @@ def install(target_dir, payload_root, filename=DEFAULT_PROXY, preserve_ini=True,
         manifest = {
             **old_manifest,
             "plugin": "decky-optiscaler",
-            "live_asi": False,
+            "live_asi": live_result["installed"],
             "optipatcher": patcher_result["installed"],
             "reframework": ref_result["installed"],
             "reframework_revision": ref_result["revision"],
@@ -1993,6 +2602,18 @@ def install(target_dir, payload_root, filename=DEFAULT_PROXY, preserve_ini=True,
             "original_directories": original_directories,
             "backup_dir": BACKUP_DIR,
         }
+        if live_result["installed"]:
+            manifest.update(
+                live_asi_sha256=live_result.get("sha256"),
+                live_build_id=live_result.get("build_id"),
+                live_profile_id=live_result.get("profile_id"),
+                live_schema=live_result.get("schema"),
+                live_core_sha256=constants.LIVE_CORE_SHA256,
+            )
+        else:
+            for key in ("live_asi_sha256", "live_build_id", "live_profile_id",
+                        "live_schema", "live_core_sha256"):
+                manifest.pop(key, None)
         validate_manifest(manifest)
         _atomic_json(_safe_path(target, MANIFEST_NAME), manifest)
 
@@ -2028,6 +2649,7 @@ def uninstall(target_dir, remove_ini=True, logger=None):
         raise NotADirectoryError(f"path does not exist: {target}")
     recover_target_transactions(target)
     require_stopped_target(target)
+    _preflight_live_control(target, check_ini_paths=False)
     manifest = read_manifest(target)
     _backup_items(target, manifest)
     legacy_names = [path.name[:-len(LEGACY_BACKUP_SUFFIX)]
@@ -2056,6 +2678,8 @@ def uninstall(target_dir, remove_ini=True, logger=None):
                 require_stopped_target(target)
                 original = original_directories.get(name)
                 if (original and original.get("exists")) or name in manifest.get("backups", {}):
+                    continue
+                if name not in manifest.get("created_directories", []):
                     continue
                 if _require_path_type(path, directory=True):
                     # Only files listed by ownership are deleted. An empty
@@ -2086,15 +2710,11 @@ def uninstall(target_dir, remove_ini=True, logger=None):
                     directory_path.rmdir()
                     removed.append(directory + "/")
         else:
-            # No ownership manifest means there is no proof over support
-            # libraries, INI, logs, ASIs or generic runtime directories. Remove
-            # only a core proxy positively identified by its image marker.
-            for name in PROXY_FILENAMES:
-                path = _safe_path(target, name)
-                if _path_exists(path) and path.is_file() and _looks_like_optiscaler(path):
-                    require_stopped_target(target)
-                    path.unlink()
-                    removed.append(name)
+            # A marker identifies OptiScaler bytes, not who installed them.
+            # Without ownership, keep them in place; explicit legacy backup
+            # files below still provide enough evidence to restore their
+            # original destinations safely.
+            pass
 
         owned_live_asi = bool(manifest and (
             f"{live.PLUGIN_SUBDIR}/{live.ASI_NAME}" in manifest.get("files", [])
@@ -2185,6 +2805,18 @@ def restore_backups(target_dir, logger=None):
     items = _backup_items(target, manifest)
     legacy_paths = list(target.glob("*" + LEGACY_BACKUP_SUFFIX))
     extra = []
+    extra_dirs = []
+    for relative, source in items:
+        if relative not in _allowed_dir_names():
+            continue
+        for base, dirs, files in os.walk(source, followlinks=False):
+            relative_base = Path(base).relative_to(source)
+            target_base = PurePosixPath(relative)
+            if relative_base.parts:
+                target_base = target_base / PurePosixPath(relative_base.as_posix())
+            extra_dirs.append(target_base.as_posix())
+            for name in files:
+                extra.append((target_base / name).as_posix())
     for path in legacy_paths:
         relative = _legacy_backup_target(path.name)
         if relative is None:
@@ -2193,22 +2825,45 @@ def restore_backups(target_dir, logger=None):
         extra.extend((path.name, relative))
 
     restored = []
-    with target_transaction(target, extra_names=extra, require_stopped=True):
+    deferred_backup_paths = []
+    stash = _safe_path(target, BACKUP_DIR)
+    known_parents = set()
+    for _, source in items:
+        relative_source = source.relative_to(stash)
+        for parent in relative_source.parents:
+            if parent != Path("."):
+                known_parents.add(stash / parent)
+    for name in _allowed_dir_names():
+        directory = stash / name
+        if _path_exists(directory):
+            _assert_plain_tree(directory)
+            known_parents.add(directory)
+            known_parents.update(path for path in directory.rglob("*") if path.is_dir())
+    with target_transaction(target, extra_names=extra, require_stopped=True,
+                            extra_dirs=extra_dirs):
         for relative, source in items:
             destination = _safe_path(target, relative)
             require_stopped_target(target)
             is_directory = relative in _allowed_dir_names()
+            deferred = []
             if is_directory:
                 _require_path_type(destination, directory=True)
                 prefix = relative + "/"
                 replace_files = {name[len(prefix):] for name in _allowed_file_names()
                                  if name.startswith(prefix)}
-                _merge_directory_tree(source, destination, target_dir=target,
-                                      replace_files=replace_files)
+                deferred = _merge_directory_tree(
+                    source, destination, target_dir=target,
+                    replace_files=replace_files,
+                )
+                if deferred:
+                    deferred_backup_paths.extend(
+                        f"{relative}/{name}" for name in deferred
+                    )
             else:
                 _require_path_type(destination, directory=False)
                 atomic_copy(source, destination, target_dir=target)
-            _remove_path(source)
+            if not (is_directory and deferred):
+                _remove_path(source)
             restored.append(relative)
             if logger:
                 logger.info("restored %s from %s/", relative, BACKUP_DIR)
@@ -2225,10 +2880,18 @@ def restore_backups(target_dir, logger=None):
             path.unlink()
             restored.append(relative)
 
+        for parent in sorted(known_parents, key=lambda path: len(path.parts), reverse=True):
+            if _path_exists(parent) and _require_path_type(parent, directory=True) and not any(parent.iterdir()):
+                parent.rmdir()
         stash = _safe_path(target, BACKUP_DIR)
         if _path_exists(stash):
             _require_path_type(stash, directory=True, allow_missing=False)
-            shutil.rmtree(stash)
+            if any(stash.iterdir()):
+                paths = ", ".join(sorted(deferred_backup_paths)) or "unknown backup items"
+                raise ValueError(
+                    f"Cannot safely clear original backups; retained {paths} in {stash}."
+                )
+            stash.rmdir()
     return restored
 
 

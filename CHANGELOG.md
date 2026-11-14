@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.8-pbz.2 (experimental)
+
+- Adapt the complete native live-control scope to the pinned pre5 core, including backend and dynamic FFX selection.
+- Separate saved settings, session-bound configuration requests and observed runtime state; reject stale version selections.
+- Preserve snapshot and Remove recovery for the bridge, loader configuration and control files.
+- Report connection readiness and unknown telemetry accurately; retain restart requirements for model/provider and startup settings.
+
 ## 0.0.8-pbz.1 (experimental)
 
 - Pin the official 0.9.5-pre5 core and community FSR4.1.1b archive; surface PBZ's version, executable folder and 100% output-scale requirements.

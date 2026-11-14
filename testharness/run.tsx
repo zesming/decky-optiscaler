@@ -33,8 +33,8 @@ const detail = {
     installed: true, filename: "dxgi.dll", managed: true, version: "0.9.4",
     runtime_current: true,
     rollback: { available: false },
-    installed_at: 1700000000, ini_present: true, ini_path: "/x/OptiScaler.ini",
-    log_present: true, log_path: "/x/OptiScaler.log",
+    installed_at: 1700000000, ini_present: true, directory_generation: "1", ini_path: "/x/OptiScaler.ini",
+    log_present: true, directory_generation: "1", log_path: "/x/OptiScaler.log",
     candidates: ["dxgi.dll"], extra_proxies: [],
     backup_dir: "/games/Cyberpunk 2077/bin/x64/decky_optiscaler_backup_files",
     backed_up: ["dxgi.dll", "amd_fidelityfx_upscaler_dx12.dll"],
@@ -44,7 +44,7 @@ const detail = {
     fsr4: { files: { "amdxcffx64.dll": false, "amdxc64.dll": false }, ready: false,
             required: ["amdxcffx64.dll", "amdxc64.dll"],
             // The version OptiScaler's overlay prints in its FFX Settings box.
-            ffx: { present: true, name: "amd_fidelityfx_upscaler_dx12.dll",
+            ffx: { present: true, directory_generation: "1", name: "amd_fidelityfx_upscaler_dx12.dll",
                    version: "4.1.1.2740", fsr4_capable: true } },
     reframework: { installed: false, revision: null, managed: false },
   },
@@ -53,7 +53,7 @@ const detail = {
                  plugin: null, plugin_installed: false, plugin_url: null,
                  plugin_name: null, complete: true },
   fsr4_sources: [{ path: "/home/deck/fgmod/fsr4-rdna2-3", files: ["amdxcffx64.dll", "amdxc64.dll"] }],
-  ini_info: { present: true, legacy: true, keys: 288 },
+  ini_info: { present: true, directory_generation: "1", legacy: true, keys: 288 },
   wiki_entry: null,
   gpu: { names: ["Van Gogh (Steam Deck)"], name: "Van Gogh (Steam Deck)", gfx: "gfx1033",
          vendor: "amd", generation: "RDNA2", fsr4: "experimental" },
@@ -61,9 +61,83 @@ const detail = {
   writable: true,
 };
 
+const runLiveKeys = [
+  "FrameGen.Enabled", "OptiFG.HUDFix", "FrameGen.DebugView",
+  "OptiFG.MakeDepthCopy", "OptiFG.HUDFixExtended", "XeFG.InterpolationCount",
+  "FSR.FGIndex", "FSR.UpscalerIndex",
+  "Upscalers.Dx11Upscaler", "Upscalers.Dx12Upscaler", "Upscalers.VulkanUpscaler",
+  "Sharpness.OverrideSharpness", "Sharpness.Sharpness", "Menu.ShowFps",
+];
+const runDynamicKeys = new Set([
+  "FSR.FGIndex", "FSR.UpscalerIndex",
+  "Upscalers.Dx11Upscaler", "Upscalers.Dx12Upscaler", "Upscalers.VulkanUpscaler",
+]);
+const runLiveCapabilities = Object.fromEntries([
+  "set_scalar", "switch_upscaler", "change_fg_index", "change_ffx_upscaler", "reset_auto",
+  "fg_scalar", "fg_enable", "fsr_debug_view", "change_xefg_count", ...runLiveKeys,
+].map((key) => [key, true]));
+const runLiveStatus: any = {
+  supported: true, schema: 7, session: "run-harness-session", seq: "1", ack: "config_request_accepted",
+  active_api: "dx12", capability_generation: "run-harness-generation-1",
+  directory_generation: "1", dir_verified: true, dir_matches: true,
+  dir: detail.install.path, ready: true, attached: true, asi_installed: true,
+  asi_available: true, asi_current: true, load_enabled: true, loaded_by_optiscaler: true,
+  state: "ready", error: null, age: 1, capabilities: runLiveCapabilities, live_keys: runLiveKeys,
+  switchable_backends: ["xess", "fsr21", "fsr22", "fsr31", "dlss"],
+  can_override_sharpness: true,
+  can_switch_upscaler: true, can_change_fg: true, can_enable_fg: true,
+  can_change_ffx_upscaler: true,
+  accepted_keys: [], failed_keys: [],
+  fps: 40.4, base_fps: 20.2, total_fps: 40.4,
+  telemetry_ready: true, telemetry_source: "state_present_counter",
+  fg_enabled: true, frames: 12000, backend_entries: 1,
+  upscaler: { dx11: null, dx12: "fsr31", vulkan: null }, pending_backend: null,
+  fg_index: 1, ffx_fg_versions: ["4.0.0", "3.1.6", "3.1.4"],
+  ffx_fg_ids: ["run-fg-0", "run-fg-1", "run-fg-2"],
+  ffx_upscaler_index: 1, ffx_upscaler_versions: ["4.1.1 *", "4.0.2", "3.1.5", "2.3.4"],
+  ffx_upscaler_ids: ["run-fsr-0", "run-fsr-1", "run-fsr-2", "run-fsr-3"],
+};
+
+function runLiveWriteResult(target: string, changes: any[]) {
+  const currentContext = {
+    target,
+    session: runLiveStatus.session,
+    active_api: runLiveStatus.active_api,
+    capability_generation: runLiveStatus.capability_generation,
+  };
+  const eligible = changes.filter((change) => {
+    const id = `${change.section}.${change.key}`;
+    if (!runLiveKeys.includes(id) || runLiveCapabilities[id] !== true) return false;
+    if (id === "FrameGen.Enabled" && String(change.value).toLowerCase() === "true" &&
+      runLiveStatus.can_enable_fg !== true) return false;
+    if (!runDynamicKeys.has(id)) return true;
+    const context = change.live_context;
+    return context?.target === currentContext.target && context.session === currentContext.session &&
+      context.active_api === currentContext.active_api &&
+      context.capability_generation === currentContext.capability_generation;
+  });
+  const keys = eligible.map((change) => `${change.section}.${change.key}`);
+  const deferred = changes
+    .filter((change) => runLiveKeys.includes(`${change.section}.${change.key}`) && !eligible.includes(change))
+    .map((change) => `${change.section}.${change.key}`);
+  if (keys.length === 0) {
+    return {
+      sent: false, confirmed: false, ack: null, session: null, seq: null,
+      applied: [], accepted_keys: [], sent_keys: [], context: null, failed_keys: [], deferred,
+    };
+  }
+  const seq = String(BigInt(runLiveStatus.seq) + 1n);
+  Object.assign(runLiveStatus, { seq, ack: "config_request_accepted", accepted_keys: keys, failed_keys: [], state: "ready" });
+  return {
+    sent: true, directory_generation: "1", confirmed: true, ack: "config_request_accepted", session: runLiveStatus.session, seq,
+    applied: keys, accepted_keys: keys, sent_keys: keys, context: currentContext,
+    failed_keys: [], deferred,
+  };
+}
+
 Object.assign(fixtures, {
   get_status: {
-    version: "0.9.4", archive_present: true, archive_path: "/p/bin/a.7z",
+    version: "0.9.4", archive_present: true, directory_generation: "1", archive_path: "/p/bin/a.7z",
     extracted: true, extract_path: "/p/payload", extractor: "7z",
     optiscaler_version: "0.9.4",
     proxy_filenames: ["dxgi.dll","winmm.dll","version.dll","dbghelp.dll","d3d12.dll","wininet.dll","winhttp.dll","OptiScaler.asi"],
@@ -171,11 +245,11 @@ Object.assign(fixtures, {
   },
   write_config: (_dir: string, changes: any[]) => {
     for (const item of changes) iniValues[item.section] = { ...(iniValues[item.section] ?? {}), [item.key]: item.value };
-    return { ok: true, applied: changes, rejected: [], live: { sent: true, deferred: [] } };
+    return { ok: true, applied: changes, rejected: [], live: runLiveWriteResult(_dir, changes) };
   },
   reset_config: { ok: true },
   get_monitor: {
-    path: "/x", log_path: "/x/OptiScaler.log", log_present: true, log_size: 2048,
+    path: "/x", log_path: "/x/OptiScaler.log", log_present: true, directory_generation: "1", log_size: 2048,
     log_modified: Date.now() / 1000, logging_enabled: "true",
     state: { upscaler: "FSR 4.0.2", proxy: "dxgi.dll", gpu: "AMD Custom GPU 0405", game_name: "Cyberpunk 2077", wine: "9.0", game_exe: "Cyberpunk2077.exe", game_version: "2.2", optiscaler_version: null },
     counts: { info: 40, warning: 2, error: 1 },
@@ -186,22 +260,17 @@ Object.assign(fixtures, {
     total_lines: 43,
   },
   clear_log: { ok: true },
-  get_live_status: {
-    supported: true,
-    asi_installed: true, asi_available: true, attached: true, ready: true, state: "ready",
-    load_enabled: true, loaded_by_optiscaler: true,
-    error: null, seq: "1", can_switch_upscaler: true, age: 1.0,
-    live_keys: ["FrameGen.Enabled", "Upscalers.Dx12Upscaler"],
-    fps: 40.4, fg_enabled: true, frames: 12000, backend_entries: 1,
-    upscaler: { dx12: "fsr31", dx11: null, vulkan: null },
-    pending_backend: null,
-    // What the in-game plugin read out of State: the frame generators the FFX
-    // SDK offered *this* game, which is what the FFX FG control lists when
-    // there is a game to ask.
-    schema: 4, can_change_fg: true, fg_index: 1,
-    ffx_fg_versions: ["4.0.0", "3.1.6"],
+  get_live_status: runLiveStatus,
+  switch_upscaler: (dir: string, code: string, context: any) => {
+    const key = context?.active_api === "dx11"
+      ? "Dx11Upscaler"
+      : context?.active_api === "vulkan"
+        ? "VulkanUpscaler"
+        : "Dx12Upscaler";
+    const live = runLiveWriteResult(dir, [{ section: "Upscalers", key, value: code, live_context: context }]);
+    if (live.sent && runLiveStatus.active_api === "dx12") runLiveStatus.upscaler.dx12 = code;
+    return { ok: true, backend: code, live };
   },
-  switch_upscaler: { ok: true, sent: true, backend: "xess" },
   // Answered per key: the Settings tab reads each remembered question in turn,
   // and a single fixture would make every one of them look answered.
   get_pref: (key: string, fallback?: unknown) =>
@@ -228,8 +297,8 @@ Object.assign(fixtures, {
   },
   verify_install: {
     ok: true, path: "/x", complete: true, problems: [],
-    files: [{ name: "dxgi.dll", present: true, matches_payload: true, size: 1, expected_size: 1 }],
-    ffx_upscaler: { present: true, version: "4.1.1.2740", fsr4_capable: true },
+    files: [{ name: "dxgi.dll", present: true, directory_generation: "1", matches_payload: true, size: 1, expected_size: 1 }],
+    ffx_upscaler: { present: true, directory_generation: "1", version: "4.1.1.2740", fsr4_capable: true },
   },
   search_wiki: { results: [
     { name: "Forza Horizon 5", page: "Forza-Horizon-5", compatibility: "OK", inputs: "DLSS", score: 1 },
@@ -355,6 +424,9 @@ async function render(name: string, element: React.ReactElement) {
   await settle();
   console.log(`  changing the FG method warns about the restart: ${
     qp.host.textContent!.includes("Restart the game to apply")}`);
+  console.log(`  startup FG method fields stay out of live confirmation: ${
+    ["FrameGen.FGInput", "FrameGen.FGOutput"].every((key) =>
+      !runLiveKeys.includes(key) && !runLiveStatus.accepted_keys.includes(key))}`);
 
   // Over a running game the controls that act now come first; the one that
   // cannot until the next launch is last, under its own heading.
@@ -620,10 +692,8 @@ async function render(name: string, element: React.ReactElement) {
       <NowPlaying runningGame={{ appid: 1091500, name: "Cyberpunk 2077", gameid: "1091500" }}
         onOpenGame={() => {}} onBrowse={() => {}} />,
     );
-    const fsrVersion = findAll(failedNow.host,
-      '[data-mock="DropdownItem"][data-label="FSR version"]')[0];
-    console.log(`  FSR version comes from the detected FidelityFX file: ${
-      fsrVersion?.getAttribute("data-shown") === "FSR 4.1.1"}`);
+    console.log(`  detected FidelityFX file version is shown on Now Playing: ${
+      failedNow.host.textContent!.includes("FidelityFX4.1.1.2740 · FSR 4 capable")}`);
     await act(async () => {
       (findAll(failedNow.host,
         '[data-mock="DropdownItem"][data-label="Override upscaler with"] [data-opt-value="xess"]')[0] as HTMLElement).click();

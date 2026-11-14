@@ -43,7 +43,7 @@ function applyChanges(dir: string, changes: { section: string; key: string; valu
 readBackend = (dir) => readResult(dir);
 writeBackend = (dir, changes) => {
   applyChanges(dir, changes);
-  return { ok: true, applied: clone(changes), live: { sent: true, deferred: [] } };
+  return { ok: true, applied: clone(changes), live: { sent: true, directory_generation: "1", deferred: [] } };
 };
 Object.assign(fixtures, {
   read_config: (dir: string) => readBackend(dir),
@@ -150,7 +150,7 @@ async function run() {
   });
   await waitFor(() => writeStarted === 1, "the shared pending write");
   assert.equal(flushSettled, false, "the foreground flush must wait for the other hook's write");
-  await act(async () => { write.resolve({ ok: true, live: { sent: true, deferred: [] } }); await sharedFlush; });
+  await act(async () => { write.resolve({ ok: true, live: { sent: true, directory_generation: "1", deferred: [] } }); await sharedFlush; });
   assert.equal(disk.get(dir2)?.FrameGen?.Enabled, "false", "flush must commit the other hook's pending value");
   await act(async () => { await flusher.hook.authoritativeReload(); });
   assert.equal(flusher.hook.values.FrameGen?.Enabled, "false", "the action's authoritative reload must show that value");
@@ -218,7 +218,7 @@ async function run() {
     let writing!: Promise<void>;
     await act(async () => { a.hook.setOption(enabledOption, "false"); writing = a.hook.flush(); await Promise.resolve(); });
     await waitFor(() => started, "the foreground write during the held read");
-    await act(async () => { delayedWrite.resolve({ ok: true, live: { sent: true, deferred: [] } }); await writing; });
+    await act(async () => { delayedWrite.resolve({ ok: true, live: { sent: true, directory_generation: "1", deferred: [] } }); await writing; });
     if (rejectOldRead) {
       await act(async () => { old.reject(new Error("read completed against the old target")); });
     } else {

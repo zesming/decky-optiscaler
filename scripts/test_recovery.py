@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,27 @@ from optiscaler.service import OptiScalerService
 def tree(path):
     return {str(p.relative_to(path)): p.read_bytes() for p in path.rglob('*')
             if p.is_file() and restorepoint.RESTORE_DIR not in p.parts}
+
+
+def filesystem_state(path):
+    """Capture path type, contents and permissions for fail-closed checks."""
+    path = Path(path)
+    result = {".": ("dir", stat.S_IMODE(path.lstat().st_mode))}
+    for base, dirs, files in os.walk(path, followlinks=False):
+        dirs.sort()
+        files.sort()
+        for name in dirs:
+            child = Path(base) / name
+            result[child.relative_to(path).as_posix()] = (
+                "dir", stat.S_IMODE(child.lstat().st_mode)
+            )
+        for name in files:
+            child = Path(base) / name
+            result[child.relative_to(path).as_posix()] = (
+                "file", hashlib.sha256(child.read_bytes()).hexdigest(),
+                stat.S_IMODE(child.lstat().st_mode),
+            )
+    return result
 
 
 class RecoveryTests(unittest.TestCase):
@@ -85,6 +107,180 @@ class RecoveryTests(unittest.TestCase):
                 self.install()
         self.assertEqual(tree(self.game), self.original)
 
+    def test_first_install_hard_exit_restores_nested_payload_and_reframework_original(self):
+        runtime_manifest = json.loads((ROOT / 'defaults/runtime-manifest.json').read_text())
+        nested_name = next(name for name in runtime_manifest['files'] if '/' in name)
+        nested_original = self.game / nested_name
+        nested_original.parent.mkdir(parents=True, exist_ok=True)
+        nested_original.write_bytes(b'original nested license')
+        nested_original.chmod(0o604)
+        ref_original = self.game / constants.REFRAMEWORK_DLL
+        ref_original.write_bytes(b'original dinput8')
+        ref_original.chmod(0o640)
+        reframework_source = self.source / constants.REFRAMEWORK_DLL
+        reframework_source.write_bytes(b'new dinput8')
+        before = filesystem_state(self.game)
+        code = """import hashlib, json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from optiscaler import constants, installer, payload
+root = Path(sys.argv[2]); source = Path(sys.argv[3]); target = Path(sys.argv[4])
+runtime = json.loads(Path(sys.argv[5]).read_text())['files']
+payload._PINNED_FILES = {
+ name: {'bytes': (source / name).stat().st_size,
+        'sha256': hashlib.sha256((source / name).read_bytes()).hexdigest()}
+ for name in runtime
+}
+constants.RUNTIME_DLL_SHA256 = hashlib.sha256((source / 'OptiScaler.dll').read_bytes()).hexdigest()
+original = installer.atomic_copy
+def stop_after_dinput8(src, dst, *args, **kwargs):
+ result = original(src, dst, *args, **kwargs)
+ if Path(dst) == target / constants.REFRAMEWORK_DLL:
+  os._exit(86)
+ return result
+installer.atomic_copy = stop_after_dinput8
+installer.install(target, source, reframework_files=[source / constants.REFRAMEWORK_DLL])
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', code, str(ROOT / 'py_modules'), str(ROOT),
+             str(self.source), str(self.game),
+             str(ROOT / 'defaults/runtime-manifest.json')],
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 86, result.stderr.decode())
+        installer.recover_target_transactions(self.game)
+        self.assertEqual(filesystem_state(self.game), before)
+
+    def test_legacy_directory_backup_returns_missing_files_and_preserves_additions(self):
+        self.install()
+        backup_tree = installer.backup_dir(self.game) / 'Licenses'
+        backup_tree.mkdir(parents=True)
+        (backup_tree / 'game.txt').write_bytes(b'old game license')
+        additions = self.game / 'Licenses' / 'third-party.txt'
+        additions.write_bytes(b'new third-party file')
+        manifest = installer.read_manifest(self.game)
+        manifest['backups']['Licenses'] = 'Licenses'
+        (self.game / constants.MANIFEST_NAME).write_text(json.dumps(manifest))
+
+        code = """import os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from optiscaler import installer
+target = Path(sys.argv[2])
+original = installer.atomic_copy
+def stop_after_returning_legacy_file(src, dst, *args, **kwargs):
+ result = original(src, dst, *args, **kwargs)
+ if Path(dst) == target / 'Licenses' / 'game.txt':
+  os._exit(87)
+ return result
+installer.atomic_copy = stop_after_returning_legacy_file
+installer.restore_backups(target)
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', code, str(ROOT / 'py_modules'), str(self.game)],
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 87, result.stderr.decode())
+        journal = next(self.game.glob(installer.TRANSACTION_PREFIX + '*'))
+        records = {item['name']: item for item in json.loads(
+            (journal / installer.TRANSACTION_RECORD).read_text())['records']}
+        self.assertEqual(records['Licenses/game.txt']['kind'], installer.TRANSACTION_FILE)
+        self.assertEqual(records['Licenses']['kind'], installer.TRANSACTION_SHARED_DIR)
+        installer.recover_target_transactions(self.game)
+        self.assertFalse((self.game / 'Licenses' / 'game.txt').exists())
+        self.assertEqual((self.game / 'Licenses' / 'third-party.txt').read_bytes(),
+                         b'new third-party file')
+        installer.restore_backups(self.game)
+        self.assertEqual((self.game / 'Licenses' / 'game.txt').read_bytes(),
+                         b'old game license')
+        self.assertEqual((self.game / 'Licenses' / 'third-party.txt').read_bytes(),
+                         b'new third-party file')
+
+    def test_legacy_directory_backup_conflict_keeps_backup_and_refuses_cleanup(self):
+        self.install()
+        backup_tree = installer.backup_dir(self.game) / 'Licenses'
+        backup_tree.mkdir(parents=True)
+        (backup_tree / 'game.txt').write_bytes(b'older game license')
+        destination = self.game / 'Licenses' / 'game.txt'
+        destination.write_bytes(b'later third-party file')
+        destination.chmod(0o604)
+        manifest = installer.read_manifest(self.game)
+        manifest['backups']['Licenses'] = 'Licenses'
+        (self.game / constants.MANIFEST_NAME).write_text(json.dumps(manifest))
+        before = filesystem_state(self.game)
+
+        with self.assertRaisesRegex(ValueError, 'retained Licenses/game.txt'):
+            installer.restore_backups(self.game)
+
+        self.assertEqual(filesystem_state(self.game), before)
+        self.assertEqual(destination.read_bytes(), b'later third-party file')
+        self.assertEqual((backup_tree / 'game.txt').read_bytes(), b'older game license')
+
+    def test_unmanaged_optiscaler_proxy_is_not_deleted_by_repeated_remove(self):
+        proxy = self.game / 'dxgi.dll'
+        original = installer.DLL_MARKER + b'hand-installed OptiScaler' + b'\0' * installer.MIN_OPTISCALER_SIZE
+        proxy.write_bytes(original)
+        proxy.chmod(0o604)
+        self.install()
+        for _ in range(2):
+            installer.uninstall(self.game)
+            self.assertEqual(proxy.read_bytes(), original)
+            self.assertEqual(stat.S_IMODE(proxy.stat().st_mode), 0o604)
+
+    def test_service_uninstall_reads_game_restore_data_after_transaction_recovery(self):
+        self.install()
+        game_path = '/games/original'
+        original_settings = {'target': None, 'auto': False, 'experiment': True}
+        manifest_path = self.game / constants.MANIFEST_NAME
+        manifest = installer.read_manifest(self.game)
+        manifest.update(game_path=game_path, game_settings_before=original_settings)
+        manifest_path.write_text(json.dumps(manifest))
+        code = """import json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from optiscaler import constants, installer
+target = Path(sys.argv[2]); path = target / constants.MANIFEST_NAME
+with installer.target_transaction(target, require_stopped=True):
+ record = json.loads(path.read_text())
+ record['game_settings_before'] = {'target': 'stale', 'auto': True, 'experiment': False}
+ installer._atomic_json(path, record)
+ os._exit(88)
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', code, str(ROOT / 'py_modules'), str(self.game)],
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 88, result.stderr.decode())
+        self.assertEqual(installer.read_manifest(self.game)['game_settings_before'],
+                         {'target': 'stale', 'auto': True, 'experiment': False})
+        with patch.object(self.service.settings, 'restore_game') as restore_game:
+            result = asyncio.run(self.service.uninstall(str(self.game)))
+        self.assertTrue(result['ok'], result)
+        restore_game.assert_called_once_with(game_path, original_settings)
+
+    def test_service_install_checks_game_identity_after_transaction_recovery(self):
+        self.install()
+        code = """import json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from optiscaler import constants, installer
+target = Path(sys.argv[2]); path = target / constants.MANIFEST_NAME
+with installer.target_transaction(target, require_stopped=True):
+ record = json.loads(path.read_text())
+ record['game_path'] = '/games/stale'
+ installer._atomic_json(path, record)
+ os._exit(89)
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', code, str(ROOT / 'py_modules'), str(self.game)],
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 89, result.stderr.decode())
+        self.service.live_asi_path = lambda: None
+        result = asyncio.run(self.service.install(str(self.game), game_path='/games/current'))
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(installer.read_manifest(self.game)['game_path'], '/games/current')
+
     def test_failed_proxy_move_can_still_be_removed_without_deleting_game_dll(self):
         self.install()
         before = tree(self.game)
@@ -128,6 +324,9 @@ class RecoveryTests(unittest.TestCase):
         disabled = asyncio.run(self.service.install_optipatcher(str(self.game), False))
         self.assertTrue(disabled['ok'], disabled)
         self.assertEqual((plugins / 'OptiPatcher.asi').read_bytes(), original)
+        installer.uninstall(self.game)
+        self.assertEqual((plugins / 'OptiPatcher.asi').read_bytes(), original)
+        self.assertFalse((self.game / constants.BACKUP_DIR).exists())
 
     def test_restore_point_and_remove_repeat_without_losing_oldest_originals(self):
         for cycle in range(2):
@@ -167,21 +366,86 @@ class RecoveryTests(unittest.TestCase):
     def test_known_old_asi_is_removed_for_upgrade_and_restored_on_rollback(self):
         self.install()
         asi = live.asi_path(self.game); asi.parent.mkdir(exist_ok=True)
-        content = b'known legacy ASI bytes'; asi.write_bytes(content)
+        content = b'known legacy ASI bytes'; asi.write_bytes(content); asi.chmod(0o600)
+        old_mode = stat.S_IMODE(asi.stat().st_mode)
         old = installer.read_manifest(self.game)
         old['optiscaler_version'] = '0.9.4'; old['live_asi'] = True
         old['files'].append(f'{live.PLUGIN_SUBDIR}/{live.ASI_NAME}')
         (self.game / constants.MANIFEST_NAME).write_text(json.dumps(old))
         before = tree(self.game)
-        restorepoint.create(self.game, {'game_path': '/games/test', 'game_settings': {'target': None, 'auto': None, 'experiment': None}, 'launch_options': 'LSFG=1 %command%'})
         with patch.object(constants, 'LEGACY_LIVE_ASI_SHA256', hashlib.sha256(content).hexdigest()):
-            self.install()
-        self.assertFalse(asi.exists())
-        self.assertFalse(installer.read_manifest(self.game)['live_asi'])
+            restorepoint.create(self.game, {'game_path': '/games/test', 'game_settings': {'target': None, 'auto': None, 'experiment': None}, 'launch_options': 'LSFG=1 %command%'})
+            self.install(live_asi=ROOT / 'bin' / live.ASI_NAME, plugin_root=ROOT)
+            packaged = ROOT / 'bin' / live.ASI_NAME
+            self.assertEqual(asi.read_bytes(), packaged.read_bytes())
+            self.assertTrue(installer.read_manifest(self.game)['live_asi'])
+            self.assertEqual(installer.read_manifest(self.game)['live_asi_sha256'],
+                             hashlib.sha256(packaged.read_bytes()).hexdigest())
+            restorepoint.restore(self.game)
+            self.assertEqual(tree(self.game), before)
+            self.assertEqual(asi.read_bytes(), content)
+            self.assertEqual(stat.S_IMODE(asi.stat().st_mode), old_mode)
+            installer.uninstall(self.game)
+            self.assertEqual(tree(self.game), self.original)
+
+    def test_direct_restore_refuses_an_unjournaled_ini_alias_before_writing(self):
+        self.install()
+        restorepoint.create(self.game, {'game_path': '/games/test', 'game_settings': {'target': None, 'auto': None, 'experiment': None}, 'launch_options': ''})
+        ini = self.game / constants.INI_NAME
+        alias = self.game / "OPTISCALER.INI"
+        ini.rename(alias)
+        before = filesystem_state(self.game)
+        with self.assertRaises(ValueError):
+            restorepoint.restore(self.game)
+        self.assertEqual(filesystem_state(self.game), before)
+
+    def test_restorepoint_refuses_unknown_live_asi_before_any_write(self):
+        self.install()
+        metadata = {
+            'game_path': '/games/test',
+            'game_settings': {'target': None, 'auto': None, 'experiment': None},
+            'launch_options': '',
+        }
+        restorepoint.create(self.game, metadata)
+        installer.install_live_component(
+            self.game, ROOT / 'bin' / live.ASI_NAME, plugin_root=ROOT
+        )
+        asi = live.asi_path(self.game)
+        asi.write_bytes(b'user replacement with unknown ASI bytes')
+        asi.chmod(0o601)
+        before = filesystem_state(self.game)
+        with self.assertRaisesRegex(ValueError, 'unknown bytes'):
+            restorepoint.restore(self.game)
+        self.assertEqual(filesystem_state(self.game), before)
+
+    def test_restorepoint_allows_known_new_and_legacy_live_asi(self):
+        self.install()
+        metadata = {
+            'game_path': '/games/test',
+            'game_settings': {'target': None, 'auto': None, 'experiment': None},
+            'launch_options': '',
+        }
+        baseline = tree(self.game)
+        restorepoint.create(self.game, metadata)
+        installer.install_live_component(
+            self.game, ROOT / 'bin' / live.ASI_NAME, plugin_root=ROOT
+        )
+        asi = live.asi_path(self.game)
+        packaged = (ROOT / 'bin' / live.ASI_NAME).read_bytes()
+        self.assertEqual(asi.read_bytes(), packaged)
         restorepoint.restore(self.game)
-        self.assertEqual(tree(self.game), before)
-        installer.uninstall(self.game)
-        self.assertEqual(tree(self.game), self.original)
+        self.assertFalse(asi.exists())
+
+        # The old build is also an explicitly recognized rollback source.
+        installer.install_live_component(
+            self.game, ROOT / 'bin' / live.ASI_NAME, plugin_root=ROOT
+        )
+        legacy = b'known legacy ASI bytes for rollback'
+        asi.write_bytes(legacy)
+        with patch.object(constants, 'LEGACY_LIVE_ASI_SHA256', hashlib.sha256(legacy).hexdigest()):
+            restorepoint.restore(self.game)
+        self.assertFalse(asi.exists())
+        self.assertEqual(tree(self.game), baseline)
 
     def test_unknown_or_unremovable_old_asi_blocks_upgrade_without_file_changes(self):
         self.install()
@@ -189,7 +453,7 @@ class RecoveryTests(unittest.TestCase):
         asi.write_bytes(b'unknown potentially incompatible ASI')
         before = tree(self.game)
         with self.assertRaises((ValueError, RuntimeError)):
-            self.install()
+            self.install(live_asi=ROOT / 'bin' / live.ASI_NAME, plugin_root=ROOT)
         self.assertEqual(tree(self.game), before)
         known = asi.read_bytes(); real_stash = installer._stash; failed = False
         def refuse(target, source, logger=None):
@@ -201,7 +465,7 @@ class RecoveryTests(unittest.TestCase):
         with patch.object(constants, 'LEGACY_LIVE_ASI_SHA256', hashlib.sha256(known).hexdigest()), \
                 patch.object(installer, '_stash', new=refuse):
             with self.assertRaises(PermissionError):
-                self.install()
+                self.install(live_asi=ROOT / 'bin' / live.ASI_NAME, plugin_root=ROOT)
         self.assertEqual(tree(self.game), before)
 
     def test_failed_rollback_keeps_current_install_and_can_be_retried(self):
@@ -369,6 +633,97 @@ with installer.target_transaction(sys.argv[2], include_known=False):
         self.assertEqual(ini.stat().st_mode & 0o777, 0o640)
         self.assertFalse(list(self.game.glob('.decky-optiscaler-tx-*')))
 
+    def test_managed_ini_recovers_canonical_absent_and_existing_case_alias(self):
+        self.install()
+        canonical = self.game / constants.INI_NAME
+        alias = self.game / constants.INI_NAME.swapcase()
+        canonical.replace(alias)
+        alias.chmod(0o604)
+        original_ini = alias.read_bytes()
+        before = filesystem_state(self.game)
+        code = """import os,sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from optiscaler import constants, installer
+target = Path(sys.argv[2])
+with installer.target_transaction(target,
+        extra_names=(constants.INI_NAME, constants.MANIFEST_NAME),
+        include_known=False, intent=installer.TRANSACTION_INTENT_MANAGED_INI):
+ Path(target, constants.INI_NAME).write_bytes(b'new canonical config')
+ os._exit(74)
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', code, str(ROOT / 'py_modules'), str(self.game)],
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 74, result.stderr.decode())
+        journal = next(self.game.glob(installer.TRANSACTION_PREFIX + '*'))
+        record_path = journal / installer.TRANSACTION_RECORD
+        record = json.loads(record_path.read_text())
+        record['version'] = installer.TRANSACTION_LEGACY_VERSION
+        for item in record['records']:
+            item.pop('kind', None)
+            item.pop('mode', None)
+        record_path.write_text(json.dumps(record))
+        installer.recover_target_transactions(self.game)
+        self.assertEqual(filesystem_state(self.game), before)
+        self.assertFalse(canonical.exists())
+        self.assertEqual(alias.read_bytes(), original_ini)
+        self.assertEqual(stat.S_IMODE(alias.stat().st_mode), 0o604)
+        self.assertFalse(list(self.game.glob('.decky-optiscaler-tx-*')))
+
+    def test_managed_ini_refuses_two_existing_casefold_aliases_before_journaling(self):
+        self.install()
+        canonical = self.game / constants.INI_NAME
+        alias = self.game / constants.INI_NAME.swapcase()
+        alias.write_bytes(canonical.read_bytes())
+        before = filesystem_state(self.game)
+        with self.assertRaisesRegex(ValueError, 'Multiple Wine-equivalent'):
+            with installer.target_transaction(
+                    self.game, extra_names=(constants.INI_NAME, constants.MANIFEST_NAME),
+                    include_known=False,
+                    intent=installer.TRANSACTION_INTENT_MANAGED_INI):
+                canonical.write_bytes(b'not reached')
+        self.assertEqual(filesystem_state(self.game), before)
+
+    def test_live_command_alias_blocks_running_writes_but_allows_stopped_repair(self):
+        self.install()
+        alias = self.game / live.CMD_FILE.swapcase()
+        alias.write_text('old mailbox')
+        report = live.status(
+            self.game, ROOT / 'bin' / live.ASI_NAME, ROOT,
+        )
+        self.assertTrue(report['can_install'], report)
+        self.assertFalse(report['live_write_safe'], report)
+        self.assertIn(live.CMD_FILE.lower(), report.get('live_write_error', '').lower())
+
+    def test_nested_managed_ini_does_not_downgrade_outer_normal_journal(self):
+        self.install()
+        before = filesystem_state(self.game)
+        code = """import os,sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from optiscaler import constants, installer
+target = Path(sys.argv[2])
+with installer.target_transaction(target):
+ with installer.target_transaction(target,
+         extra_names=(constants.INI_NAME, constants.MANIFEST_NAME),
+         include_known=False, intent=installer.TRANSACTION_INTENT_MANAGED_INI):
+  Path(target, constants.INI_NAME).write_bytes(b'nested config change')
+  os._exit(75)
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', code, str(ROOT / 'py_modules'), str(self.game)],
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 75, result.stderr.decode())
+        journal = next(self.game.glob(installer.TRANSACTION_PREFIX + '*'))
+        record = json.loads((journal / installer.TRANSACTION_RECORD).read_text())
+        self.assertEqual(record['intent'], installer.TRANSACTION_INTENT_NORMAL)
+        installer.recover_target_transactions(self.game)
+        self.assertEqual(filesystem_state(self.game), before)
+        self.assertFalse(list(self.game.glob('.decky-optiscaler-tx-*')))
+
     def test_launch_record_failed_publish_can_retry_and_unreadable_is_rejected(self):
         with patch.object(os, 'link', side_effect=OSError('publish denied')):
             with self.assertRaises(OSError):
@@ -417,6 +772,196 @@ with installer.target_transaction(sys.argv[2], include_known=False):
             installer.recover_target_transactions(self.game)
         self.assertEqual(ini.read_bytes(), b'original')
         self.assertFalse(list(self.game.glob('.decky-optiscaler-tx-*')))
+
+    def test_interrupted_recovery_restores_exact_files_and_keeps_shared_children(self):
+        plugins = self.game / live.PLUGIN_SUBDIR; plugins.mkdir(mode=0o750)
+        community = plugins / 'community.asi'; community.write_bytes(b'user original')
+        community.chmod(0o640)
+        licenses = self.game / 'Licenses'; licenses.mkdir(mode=0o710)
+        pinned = licenses / 'XeSS_LICENSE.txt'; pinned.write_bytes(b'game original license')
+        pinned.chmod(0o604)
+        unrelated = licenses / 'game-license.txt'; unrelated.write_bytes(b'game data')
+        code = """import os,sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from optiscaler import installer
+target=Path(sys.argv[2])
+with installer.target_transaction(target, require_stopped=True):
+ Path(target, 'Licenses/XeSS_LICENSE.txt').write_bytes(b'partial managed write')
+ Path(target, 'plugins/community.asi').write_bytes(b'user edit')
+ Path(target, 'plugins/new.asi').write_bytes(b'third-party addition')
+ Path(target, 'Licenses/new-license.txt').write_bytes(b'third-party addition')
+ os._exit(81)
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', code, str(ROOT / 'py_modules'), str(self.game)],
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 81, result.stderr.decode())
+        installer.recover_target_transactions(self.game)
+        self.assertEqual(pinned.read_bytes(), b'game original license')
+        self.assertEqual(stat.S_IMODE(pinned.stat().st_mode), 0o604)
+        self.assertEqual(community.read_bytes(), b'user edit')
+        self.assertEqual(stat.S_IMODE(community.stat().st_mode), 0o640)
+        self.assertEqual((plugins / 'new.asi').read_bytes(), b'third-party addition')
+        self.assertEqual(unrelated.read_bytes(), b'game data')
+        self.assertEqual((licenses / 'new-license.txt').read_bytes(), b'third-party addition')
+        self.assertEqual(stat.S_IMODE(plugins.stat().st_mode), 0o750)
+        self.assertEqual(stat.S_IMODE(licenses.stat().st_mode), 0o710)
+
+    def test_recovery_keeps_a_new_nonempty_directory_that_was_absent_at_start(self):
+        code = """import os,sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from optiscaler import installer
+target=Path(sys.argv[2])
+with installer.target_transaction(target, require_stopped=True):
+ user=Path(target, 'plugins/community.asi')
+ user.parent.mkdir()
+ user.write_bytes(b'third-party addition')
+ os._exit(82)
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', code, str(ROOT / 'py_modules'), str(self.game)],
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 82, result.stderr.decode())
+        installer.recover_target_transactions(self.game)
+        self.assertEqual((self.game / 'plugins/community.asi').read_bytes(),
+                         b'third-party addition')
+
+    def test_unknown_live_asi_blocks_recovery_before_target_or_journal_writes(self):
+        code = """import os,sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from optiscaler import installer
+target=Path(sys.argv[2])
+with installer.target_transaction(target, require_stopped=True):
+ Path(target, 'dxgi.dll').write_bytes(b'partial runtime')
+ os._exit(83)
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', code, str(ROOT / 'py_modules'), str(self.game)],
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 83, result.stderr.decode())
+        asi = self.game / live.PLUGIN_SUBDIR / live.ASI_NAME
+        asi.parent.mkdir(); asi.write_bytes(b'user replacement with unknown bytes')
+        asi.chmod(0o601)
+        before = filesystem_state(self.game)
+        with self.assertRaisesRegex(ValueError, 'unknown bytes'):
+            installer.recover_target_transactions(self.game)
+        self.assertEqual(filesystem_state(self.game), before)
+        self.assertTrue(list(self.game.glob(installer.TRANSACTION_PREFIX + '*')))
+
+    def test_v1_shared_directory_tree_is_refused_but_v1_file_journal_recovers(self):
+        plugins = self.game / live.PLUGIN_SUBDIR; plugins.mkdir()
+        (plugins / 'community.asi').write_bytes(b'third-party')
+        journal = self.game / f'{installer.TRANSACTION_PREFIX}legacy-shared'
+        entries = journal / 'entries'; entries.mkdir(parents=True)
+        (entries / '000000').write_bytes(b'original proxy')
+        shutil.copytree(plugins, entries / '000001')
+        proxy = self.game / 'dxgi.dll'; proxy.write_bytes(b'partial proxy')
+        record = {
+            'version': installer.TRANSACTION_LEGACY_VERSION,
+            'target': str(self.game.resolve()), 'status': 'active',
+            'require_stopped': True, 'intent': installer.TRANSACTION_INTENT_STOPPED,
+            'records': [
+                {'name': 'dxgi.dll', 'exists': True, 'stored': '000000'},
+                {'name': 'plugins', 'exists': True, 'stored': '000001'},
+            ],
+        }
+        (journal / installer.TRANSACTION_RECORD).write_text(json.dumps(record))
+        before = filesystem_state(self.game)
+        with self.assertRaisesRegex(RuntimeError, 'shared directory snapshot is ambiguous'):
+            installer.recover_target_transactions(self.game)
+        self.assertEqual(filesystem_state(self.game), before)
+        self.assertTrue(journal.is_dir())
+
+        shutil.rmtree(journal)
+        journal = self.game / f'{installer.TRANSACTION_PREFIX}legacy-absent-shared'
+        entries = journal / 'entries'; entries.mkdir(parents=True)
+        (entries / '000000').write_bytes(b'original proxy')
+        record['records'] = [
+            {'name': 'dxgi.dll', 'exists': True, 'stored': '000000'},
+            {'name': 'plugins', 'exists': False, 'stored': None},
+        ]
+        (journal / installer.TRANSACTION_RECORD).write_text(json.dumps(record))
+        with self.assertRaisesRegex(RuntimeError, 'shared directory snapshot is ambiguous'):
+            installer.recover_target_transactions(self.game)
+        self.assertEqual((self.game / 'dxgi.dll').read_bytes(), b'partial proxy')
+        self.assertTrue(journal.is_dir())
+
+        shutil.rmtree(journal)
+        journal = self.game / f'{installer.TRANSACTION_PREFIX}legacy-file'
+        entries = journal / 'entries'; entries.mkdir(parents=True)
+        (entries / '000000').write_bytes(b'original proxy')
+        stash = installer.backup_dir(self.game); stash.mkdir()
+        (stash / 'oldest.dll').write_bytes(b'original backup')
+        shutil.copytree(stash, entries / '000001')
+        (stash / 'partial.dll').write_bytes(b'partial backup write')
+        record['records'] = [
+            {'name': 'dxgi.dll', 'exists': True, 'stored': '000000'},
+            {'name': constants.BACKUP_DIR, 'exists': True, 'stored': '000001'},
+        ]
+        (journal / installer.TRANSACTION_RECORD).write_text(json.dumps(record))
+        installer.recover_target_transactions(self.game)
+        self.assertEqual(proxy.read_bytes(), b'original proxy')
+        self.assertEqual([item.name for item in stash.iterdir()], ['oldest.dll'])
+        self.assertFalse(journal.exists())
+
+    def test_casefold_transaction_alias_records_allow_one_existing_or_both_absent(self):
+        canonical = constants.INI_NAME
+        alias = canonical.swapcase()
+        allowed = (
+            [{'name': canonical, 'exists': True}, {'name': alias, 'exists': False}],
+            [{'name': canonical, 'exists': False}, {'name': alias, 'exists': True}],
+            [{'name': canonical, 'exists': False}, {'name': alias, 'exists': False}],
+        )
+        for records in allowed:
+            installer._validate_casefold_transaction_aliases(records, {canonical})
+        with self.assertRaisesRegex(ValueError, 'conflicting'):
+            installer._validate_casefold_transaction_aliases(
+                [{'name': canonical, 'exists': True}, {'name': alias, 'exists': True}],
+                {canonical},
+            )
+
+    def test_service_source_preflight_does_not_recover_an_active_transaction(self):
+        code = """import os,sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from optiscaler import installer
+target=Path(sys.argv[2])
+with installer.target_transaction(target, require_stopped=True):
+ Path(target, 'dxgi.dll').write_bytes(b'partial proxy')
+ os._exit(84)
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', code, str(ROOT / 'py_modules'), str(self.game)],
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 84, result.stderr.decode())
+        invalid_payload = self.root / 'invalid-payload'; invalid_payload.mkdir()
+        self.service.ensure_payload = AsyncMock(return_value=str(invalid_payload))
+        result = asyncio.run(self.service.install(str(self.game)))
+        self.assertFalse(result['ok'], result)
+        self.assertEqual((self.game / 'dxgi.dll').read_bytes(), b'partial proxy')
+        self.assertTrue(list(self.game.glob(installer.TRANSACTION_PREFIX + '*')))
+
+    def test_live_status_temp_preflight_uses_one_missing_safe_lstat(self):
+        target = self.game.resolve()
+        status_temp = target / live.STATUS_TEMP_FILE
+        real_lstat = Path.lstat
+        calls = []
+
+        def counted(path):
+            if Path(path) == status_temp:
+                calls.append(path)
+            return real_lstat(path)
+
+        with patch.object(Path, 'lstat', new=counted):
+            installer._preflight_live_control(target, check_ini_paths=False)
+        self.assertEqual(len(calls), 1)
 
     def test_snapshot_preparation_failure_never_rewrites_target(self):
         ini = self.game / constants.INI_NAME; ini.write_bytes(b'original ini')
@@ -519,6 +1064,76 @@ with installer.target_transaction(sys.argv[2], include_known=False):
         with self.assertRaises((ValueError, RuntimeError)):
             installer.add_files(self.game, [reframework])
         self.assertEqual(tree(self.game), before)
+
+    def test_fsr4_import_rejects_empty_or_symlink_source_before_recovery(self):
+        code = """import os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from optiscaler import installer
+target = Path(sys.argv[2])
+with installer.target_transaction(target, require_stopped=True):
+ Path(target, 'dxgi.dll').write_bytes(b'partial proxy')
+ os._exit(90)
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', code, str(ROOT / 'py_modules'), str(self.game)],
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 90, result.stderr.decode())
+        before = filesystem_state(self.game)
+        empty = self.root / 'empty-source'; empty.mkdir()
+        symlink = self.root / 'source-link'; symlink.symlink_to(empty, target_is_directory=True)
+        for invalid in (empty, symlink):
+            with self.subTest(source=invalid.name):
+                with self.assertRaises((FileNotFoundError, NotADirectoryError)):
+                    installer.import_fsr4_files(self.game, invalid)
+                self.assertEqual(filesystem_state(self.game), before)
+        self.assertTrue(list(self.game.glob(installer.TRANSACTION_PREFIX + '*')))
+
+    def test_requested_live_sources_are_validated_before_target_recovery(self):
+        code = """import os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from optiscaler import installer
+target = Path(sys.argv[2])
+with installer.target_transaction(target, require_stopped=True):
+ Path(target, 'dxgi.dll').write_bytes(b'partial proxy')
+ os._exit(91)
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', code, str(ROOT / 'py_modules'), str(self.game)],
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 91, result.stderr.decode())
+        before = filesystem_state(self.game)
+        bad_source = self.root / 'bad-live.asi'; bad_source.write_bytes(b'bad live ASI')
+        bad_patcher = self.root / 'bad-patcher.asi'; bad_patcher.symlink_to(bad_source)
+
+        unavailable = OptiScalerService(
+            self.root / 'corrupt-plugin', self.root / 'bad-settings',
+            self.root / 'bad-runtime', self.root / 'bad-home',
+            logging.getLogger('bad-source'),
+        )
+        (unavailable.plugin_dir / 'bin').mkdir(parents=True)
+        corrupt_packaged = unavailable.plugin_dir / 'bin' / live.ASI_NAME
+        corrupt_packaged.write_bytes(b'corrupt shipped ASI')
+        self.assertEqual(unavailable.live_asi_path(), str(corrupt_packaged))
+
+        self.service.live_asi_path = lambda: str(bad_source)
+        result = asyncio.run(self.service.install(str(self.game)))
+        self.assertFalse(result['ok'], result)
+        self.assertEqual(filesystem_state(self.game), before)
+
+        self.service.live_asi_path = lambda: None
+        self.service.optipatcher_path = lambda: str(bad_patcher)
+        for operation in (
+            lambda: self.service.install(str(self.game), optipatcher=True),
+            lambda: self.service.install_optipatcher(str(self.game), True),
+        ):
+            result = asyncio.run(operation())
+            self.assertFalse(result['ok'], result)
+            self.assertEqual(filesystem_state(self.game), before)
+        self.assertTrue(list(self.game.glob(installer.TRANSACTION_PREFIX + '*')))
 
     def test_rollback_preserves_unowned_files_inside_payload_directories(self):
         self.install()
@@ -690,6 +1305,122 @@ with installer.target_transaction(sys.argv[2],include_known=False):
         installer.uninstall(self.game)
         self.assertEqual(target.read_bytes(), b'new original added by game update')
 
+    def test_f9283_snapshot_restores_new_temp_backup_and_preserves_unknown_temp(self):
+        self.install()
+        temp_names = {
+            live.CMD_TEMP_FILE, live.STATUS_TEMP_FILE, live.LOG_TEMP_FILE,
+        }
+        old_manifest = installer.read_manifest(self.game)
+        old_manifest["files"] = [name for name in old_manifest["files"]
+                                  if name not in temp_names]
+        for name in temp_names:
+            old_manifest["backups"].pop(name, None)
+        (self.game / constants.MANIFEST_NAME).write_text(json.dumps(old_manifest))
+
+        # A root-level temp file can predate the newer manifest without having
+        # been owned by the old package. The f9283 snapshot did not inventory
+        # these three paths, so their later fate must follow current evidence.
+        unknown = self.game / live.LOG_TEMP_FILE
+        unknown.write_bytes(b"pre-existing unknown temp")
+        os.chmod(unknown, 0o604)
+        metadata = {
+            "game_path": "/games/test",
+            "game_settings": {"target": None, "auto": None, "experiment": None},
+            "launch_options": "",
+        }
+        self.assertTrue(restorepoint.create(self.game, metadata)["available"])
+
+        snapshot = self.game / restorepoint.RESTORE_DIR
+        record_path = snapshot / restorepoint.SNAPSHOT_FILE
+        record = json.loads(record_path.read_text())
+        old_candidates = restorepoint._legacy_candidate_paths(
+            self.game, legacy_live_inventory=True
+        )
+        self.assertTrue(temp_names.isdisjoint(old_candidates))
+        shutil.rmtree(snapshot / "entries")
+        (snapshot / "entries").mkdir()
+        legacy_entries = []
+        for index, name in enumerate(old_candidates):
+            source = installer._safe_path(self.game, name)
+            try:
+                mode = source.lstat().st_mode
+            except FileNotFoundError:
+                mode = None
+            entry = {"path": name, "exists": mode is not None,
+                     "stored": None, "object": None}
+            if mode is not None:
+                stored = f"{index:06d}"
+                destination = snapshot / "entries" / stored
+                if stat.S_ISDIR(mode):
+                    shutil.copytree(source, destination)
+                else:
+                    shutil.copy2(source, destination)
+                entry["stored"] = stored
+                entry["object"] = restorepoint._object_digest(destination)
+            legacy_entries.append(entry)
+        record["schema_version"] = restorepoint.SNAPSHOT_LEGACY_VERSION
+        record["candidate_paths"] = old_candidates
+        record["entries"] = legacy_entries
+        record["owned"]["files"] = [name for name in record["owned"]["files"]
+                                    if name not in temp_names]
+        record_path.write_text(json.dumps(record, indent=2))
+        self.assertTrue(restorepoint.info(self.game)["available"])
+
+        # The game adds a new original after the old snapshot. Installing the
+        # current bridge adopts and backs it up; restoration must return those
+        # bytes and permission bits before the old backup tree is swapped in.
+        command_temp = self.game / live.CMD_TEMP_FILE
+        command_original = b"game-update command temp"
+        command_temp.write_bytes(command_original)
+        os.chmod(command_temp, 0o620)
+        installer.install_live_component(
+            self.game, ROOT / "bin" / live.ASI_NAME, plugin_root=ROOT
+        )
+        third_party_asi = self.game / live.PLUGIN_SUBDIR / "community-added.asi"
+        third_party_asi.write_bytes(b"third-party plugin added after snapshot")
+        third_party_asi.chmod(0o604)
+
+        # This path is currently owned but has no backup, so it is removed.
+        owned_absent = self.game / live.STATUS_TEMP_FILE
+        owned_absent.write_bytes(b"new owned temp")
+        os.chmod(owned_absent, 0o600)
+
+        # Remove all current evidence for the log temp, then change the file.
+        # Restore must preserve this mixed unknown file byte-for-byte.
+        current_manifest = installer.read_manifest(self.game)
+        current_manifest["files"] = [name for name in current_manifest["files"]
+                                      if name != live.LOG_TEMP_FILE]
+        current_manifest["backups"].pop(live.LOG_TEMP_FILE, None)
+        log_backup = installer.backup_dir(self.game) / live.LOG_TEMP_FILE
+        log_backup.unlink(missing_ok=True)
+        unknown_bytes = b"changed unknown temp after upgrade"
+        unknown.write_bytes(unknown_bytes)
+        os.chmod(unknown, 0o604)
+
+        # Simulate the bridge using its temporary command slot after the game
+        # original has been stashed.
+        command_temp.write_bytes(b"transient live command")
+        os.chmod(command_temp, 0o600)
+        installer._atomic_json(self.game / constants.MANIFEST_NAME, current_manifest)
+
+        restorepoint.restore(self.game)
+        self.assertEqual(command_temp.read_bytes(), command_original)
+        self.assertEqual(stat.S_IMODE(command_temp.stat().st_mode), 0o620)
+        self.assertEqual(third_party_asi.read_bytes(),
+                         b"third-party plugin added after snapshot")
+        self.assertEqual(stat.S_IMODE(third_party_asi.stat().st_mode), 0o604)
+        self.assertFalse(owned_absent.exists())
+        self.assertEqual(unknown.read_bytes(), unknown_bytes)
+        self.assertEqual(stat.S_IMODE(unknown.stat().st_mode), 0o604)
+        restored_manifest = installer.read_manifest(self.game)
+        self.assertTrue(temp_names.isdisjoint(restored_manifest["files"]))
+        self.assertTrue(temp_names.isdisjoint(restored_manifest["backups"]))
+        installer.uninstall(self.game)
+        self.assertEqual(command_temp.read_bytes(), command_original)
+        self.assertEqual(third_party_asi.read_bytes(),
+                         b"third-party plugin added after snapshot")
+        self.assertEqual(unknown.read_bytes(), unknown_bytes)
+
     def test_rejected_root_proxy_symlink_never_leaves_an_active_journal(self):
         path = self.game / 'dxgi.dll'; path.unlink(); path.symlink_to('user.txt')
         with self.assertRaises((ValueError, RuntimeError)):
@@ -797,16 +1528,37 @@ with installer.target_transaction(sys.argv[2],include_known=False):
                 self.assertEqual((self.game / constants.INI_NAME).read_text(), text)
                 (self.game / constants.INI_NAME).unlink()
 
-    def test_beta_never_installs_or_sends_commands_to_old_live_asi(self):
+    def test_matching_bridge_install_does_not_trust_a_legacy_heartbeat(self):
+        # setUp pins the synthetic core for file-lifecycle checks. This does
+        # not simulate native ABI compatibility or create a running session.
         self.install()
-        for call in (lambda: self.service.install_live(str(self.game)),
-                     lambda: self.service.switch_upscaler(str(self.game), 'fsr31')):
-            self.assertFalse(asyncio.run(call())['ok'])
+        result = asyncio.run(self.service.install_live(str(self.game)))
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(live.asi_path(self.game).read_bytes(),
+                         (ROOT / 'bin' / live.ASI_NAME).read_bytes())
         status = asyncio.run(self.service.get_live_status(str(self.game)))
         self.assertFalse(status['attached'])
-        self.assertFalse(status['supported'])
+        self.assertFalse(status['ready'])
+        (self.game / live.STATUS_FILE).write_text('schema 5\nstatus ready\nseq 1\n')
+        status = asyncio.run(self.service.get_live_status(str(self.game)))
+        self.assertFalse(status['attached'])
+        self.assertTrue(status['legacy_running'])
+        self.assertFalse(status['ready'])
+        self.assertFalse(status['can_switch_upscaler'])
+        switched = asyncio.run(self.service.switch_upscaler(str(self.game), 'fsr31'))
+        self.assertFalse(switched['ok'], switched)
+        written = asyncio.run(self.service.write_config(str(self.game), [
+            {'section': 'Menu', 'key': 'ShowFps', 'value': 'true'}]))
+        self.assertTrue(written['ok'], written)
+        self.assertFalse(written['live']['sent'])
+        self.assertFalse(written['live']['confirmed'])
         self.assertFalse((self.game / live.CMD_FILE).exists())
-        self.assertFalse(live.asi_path(self.game).exists())
+        os.utime(self.game / live.STATUS_FILE, (0, 0))
+        stale = asyncio.run(self.service.get_live_status(str(self.game)))
+        self.assertFalse(stale['attached'])
+        self.assertFalse(stale['legacy_running'])
+        installer.uninstall(self.game)
+        self.assertEqual(tree(self.game), self.original)
 
     def test_pbz_target_and_offline_requirements_are_explicit(self):
         root = self.root / 'PBZ'; canonical = root / 'platform/steam'
@@ -863,6 +1615,9 @@ with installer.target_transaction(sys.argv[2],include_known=False):
         self.assertEqual(planned['recommendation']['game'], 'Phantom Blade Zero')
         self.assertEqual(planned['plan']['required_target'], 'PBZ/platform/steam')
 
+        # The mock below exercises the selected target route only. Keep a real
+        # managed install underneath automatic config preflight.
+        installer.install(canonical, self.source)
         self.service.get_auto_plan = AsyncMock(return_value=planned)
         self.service.install = AsyncMock(return_value={'ok': True, 'applied': []})
         wrong_target = self.root / 'wrong-target'; wrong_target.mkdir()
@@ -992,6 +1747,9 @@ with installer.target_transaction(sys.argv[2],include_known=False):
         self.service.settings.set_wiki_entry(str(root), 'Unrelated Compatibility Entry')
         detail = asyncio.run(self.service.get_game(str(root), 'Generic Game'))
         self.assertIsNone(detail['pbz_target'])
+        # Automatic settings require a manifest-backed config recovery path;
+        # the service.install mock below only isolates target routing.
+        installer.install(target, self.source)
 
         planned = {'recommendation': {'matched': True, 'game': 'Generic Game'},
                    'plan': {'available': True, 'filename': 'dxgi.dll', 'optipatcher': False,
