@@ -9,6 +9,8 @@ interface Props {
   targetDir: string;
   sources: Fsr4Source[];
   gpu: GpuInfo | undefined;
+  readOnly?: boolean;
+  onBeforeMutation?: () => Promise<void> | void;
   onChanged: () => Promise<void> | void;
 }
 
@@ -28,7 +30,14 @@ const GPU_NOTE: Record<string, string> = {
  * so the useful question is whether that file is really there and which version
  * it is — not whether some extra download is missing.
  */
-export function Fsr4Panel({ targetDir, sources, gpu, onChanged }: Props) {
+export function Fsr4Panel({
+  targetDir,
+  sources,
+  gpu,
+  readOnly = false,
+  onBeforeMutation,
+  onChanged,
+}: Props) {
   const [report, setReport] = useState<VerifyResult | null>(null);
   const [build, setBuild] = useState<Fsr4Build | null>(null);
   const [busy, setBusy] = useState(false);
@@ -51,6 +60,13 @@ export function Fsr4Panel({ targetDir, sources, gpu, onChanged }: Props) {
 
   return (
     <PanelSection title="Installed Files & FSR 4">
+      {readOnly ? (
+        <PanelSectionRow>
+          <Notice tone="warn" title="Runtime is read-only">
+            Upgrade the OptiScaler runtime in Setup before changing FSR files.
+          </Notice>
+        </PanelSectionRow>
+      ) : null}
       <PanelSectionRow>
         <div style={{ padding: "2px 0" }}>
           <div style={{ marginBottom: "6px" }}>
@@ -105,11 +121,12 @@ export function Fsr4Panel({ targetDir, sources, gpu, onChanged }: Props) {
 
       {build?.known && build.id !== "bundled" ? (
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={Boolean(busy)}
+          <ButtonItem layout="below" disabled={Boolean(busy || readOnly)}
             description="Close the game first. Keeps your upscaler and frame generation settings."
             onClick={async () => {
               setBusy(true);
               try {
+                await onBeforeMutation?.();
                 const result = await restoreFsr4Build(targetDir);
                 if (!result.ok) throw new Error(result.error);
                 await onChanged();
@@ -141,11 +158,12 @@ export function Fsr4Panel({ targetDir, sources, gpu, onChanged }: Props) {
             <PanelSectionRow key={source.path}>
               <ButtonItem
                 layout="below"
-                disabled={busy}
+                disabled={busy || readOnly}
                 description={source.files.join(", ")}
                 onClick={async () => {
                   setBusy(true);
                   try {
+                    await onBeforeMutation?.();
                     const result = await importFsr4Files(targetDir, source.path);
                     if (result.ok) {
                       toaster.toast({ title: "Copied into game folder", body: source.files.join(", ") });
@@ -154,6 +172,8 @@ export function Fsr4Panel({ targetDir, sources, gpu, onChanged }: Props) {
                     } else {
                       toaster.toast({ title: "Copy failed", body: String(result.error) });
                     }
+                  } catch (exc) {
+                    toaster.toast({ title: "Copy failed", body: String(exc) });
                   } finally {
                     setBusy(false);
                   }

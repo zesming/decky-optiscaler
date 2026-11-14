@@ -94,7 +94,7 @@ function Tile({
  * one counter reads as the feature not being there.
  */
 export function LiveTiles({ live, fgSub }: { live: LiveStatus | null; fgSub?: string }) {
-  if (!live?.attached) return null;
+  if (!live?.attached || live.supported === false) return null;
   const rate = (value: number | null | undefined) =>
     typeof value === "number" && value > 0 ? value.toFixed(0) : "—";
   const fg = typeof live.fg_enabled === "boolean" ? (live.fg_enabled ? "ON" : "OFF") : "—";
@@ -140,7 +140,7 @@ export function LiveTiles({ live, fgSub }: { live: LiveStatus | null; fgSub?: st
 }
 
 export function LiveStats({ live }: { live: LiveStatus | null }) {
-  if (!live?.attached) return null;
+  if (!live?.attached || live.supported === false) return null;
 
   const upscalerName = liveUpscalerLabel(live) ?? "unknown";
   // A status file written by an older build of the in-game plugin has none of

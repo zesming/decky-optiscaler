@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "out"
 
 # Files and directories that make up the installed plugin.
-INCLUDE_FILES = ["plugin.json", "package.json", "main.py", "README.md", "LICENSE"]
+INCLUDE_FILES = ["plugin.json", "package.json", "main.py", "README.md", "LICENSE",
+                 "docs/phantom-blade-zero.md", "docs/steam-deck-fsr4.md"]
 INCLUDE_DIRS = ["dist", "py_modules", "bin", "defaults"]
 
 EXCLUDE_NAMES = {"__pycache__", ".DS_Store", "node_modules", ".git"}
@@ -48,14 +49,13 @@ def collect():
     return entries
 
 
-# bin/ holds exactly two things: the pinned OptiScaler release archive and the
-# compiled live-control ASI. Anything else is almost certainly an extracted
-# payload, which would multiply the zip size.
+# Keep only the two pinned archives and the optional OptiPatcher component;
+# extracted trees and the retired live-control ASI must never enter the zip.
 ALLOWED_BIN_SUFFIXES = (".7z", ".asi")
 
 
 def check_bin():
-    """bin/ must hold only the release archive and the live-control plugin."""
+    """Reject extracted payloads and unexpected component types."""
     bin_dir = ROOT / "bin"
     if not bin_dir.is_dir():
         return
@@ -73,8 +73,7 @@ def check_bin():
 
     asi = bin_dir / "decky_optiscaler_live.asi"
     if not asi.is_file():
-        print("  note: bin/decky_optiscaler_live.asi missing -- live in-game control "
-              "will be unavailable. Build it with asi/build.sh.")
+        print("  Live control is disabled: this runtime has no validated Decky ASI ABI.")
     if not (bin_dir / "OptiPatcher.asi").is_file():
         print("  note: bin/OptiPatcher.asi missing -- the OptiPatcher option will be "
               "offered as unavailable. Fetch it from the OptiPatcher rolling release.")
@@ -86,6 +85,23 @@ def main():
     name = plugin["name"]
     version = package.get("version", "0.0.0")
     check_bin()
+    sys.path.insert(0, str(ROOT / "py_modules"))
+    from optiscaler.constants import (PAYLOAD_ARCHIVE, PAYLOAD_SHA256, FSR4_BUILDS,
+                                      LIVE_CONTROL_SUPPORTED, OPTIPATCHER_SHA256)
+    from optiscaler.payload import sha256
+    required = {PAYLOAD_ARCHIVE, "OptiPatcher.asi", FSR4_BUILDS[0]["sources"][0]["asset"]}
+    actual = {p.name for p in (ROOT / "bin").iterdir() if p.is_file() and p.name != ".DS_Store"}
+    if not LIVE_CONTROL_SUPPORTED and "decky_optiscaler_live.asi" in actual:
+        sys.exit("The incompatible live ASI must not be shipped in this beta.")
+    if actual != required:
+        sys.exit(f"Unexpected bin inventory: missing={required-actual}, extra={actual-required}")
+    if sha256(ROOT / "bin" / "OptiPatcher.asi") != OPTIPATCHER_SHA256:
+        sys.exit("OptiPatcher does not match the pinned checksum.")
+    if sha256(ROOT / "bin" / PAYLOAD_ARCHIVE) != PAYLOAD_SHA256:
+        sys.exit("Runtime archive does not match the pinned checksum.")
+    community = FSR4_BUILDS[0]["sources"][0]
+    if sha256(ROOT / "bin" / community["asset"]) != community["archive_sha256"]:
+        sys.exit("Community archive does not match the pinned checksum.")
 
     if not (ROOT / "dist" / "index.js").is_file():
         sys.exit("dist/index.js is missing — run `pnpm build` first.")

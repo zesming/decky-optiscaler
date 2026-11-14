@@ -215,7 +215,8 @@ async def run():
         check("backup folder created", stash.is_dir(), stash.name)
         check("game's own FidelityFX dll set aside",
               (stash / "amd_fidelityfx_upscaler_dx12.dll").is_file())
-        check("game's own Licenses folder set aside", (stash / "Licenses").is_dir())
+        check("game's own license remains available while OptiScaler is installed",
+              (target / "Licenses" / "game.txt").read_text() == "GAME LICENSE")
         check("OptiScaler's FidelityFX dll actually replaced it",
               (target / "amd_fidelityfx_upscaler_dx12.dll").read_bytes() != game_upscaler)
 
@@ -357,12 +358,20 @@ async def run():
             {"section": "FrameGen", "key": "FGOutput", "value": "NOT_A_VALUE"},
             {"section": "Sharpness", "key": "Sharpness", "value": "9.9"},
         ])
-        check("valid changes applied", len(write["applied"]) == 3, write["applied"])
+        check("a rejected batch applies nothing", not write["ok"] and write["applied"] == [])
+        check("a rejected batch leaves every original byte intact",
+              (target / "OptiScaler.ini").read_text(encoding="utf-8") == before)
         check("invalid enum rejected",
               any(r["key"] == "FGOutput" for r in write["rejected"]))
         check("out-of-range float rejected",
               any(r["key"] == "Sharpness" for r in write["rejected"]))
 
+        write = await service.write_config(str(target), [
+            {"section": "FrameGen", "key": "Enabled", "value": "true"},
+            {"section": "FrameGen", "key": "FGInput", "value": "fsrfg"},
+            {"section": "Upscalers", "key": "Dx12Upscaler", "value": "fsr31"},
+        ])
+        check("valid changes applied", write["ok"] and len(write["applied"]) == 3, write)
         after_ini = IniFile(target / "OptiScaler.ini")
         values = after_ini.to_dict()
         check("values persisted",
@@ -1504,7 +1513,7 @@ def check_wiki_transport():
     attempts = []
 
     def stalls_once(request, timeout, context, binary=False):
-        attempts.append(socket_mod.getaddrinfo)
+        attempts.append((socket_mod.getaddrinfo, wiki_mod._force_ipv4.get()))
         if len(attempts) == 1:
             raise urllib.error.URLError(TimeoutError("timed out"))
         return "| Game | Compatibility |\n|---|---|\n| [X](X) | OK |\n"
@@ -1515,9 +1524,9 @@ def check_wiki_transport():
         check("a stalled connection is retried rather than given up on",
               body.startswith("| Game"), len(attempts))
         check("and the retry is the one that forces IPv4",
-              attempts[1] is not attempts[0])
+              attempts[1][1] is True and attempts[0][1] is False)
         check("the resolver is put back afterwards",
-              socket_mod.getaddrinfo is attempts[0])
+              socket_mod.getaddrinfo is attempts[0][0] and not wiki_mod._force_ipv4.get())
 
         # A server that answered is not retried: asking again says the same.
         attempts.clear()
@@ -1587,8 +1596,8 @@ def check_version_pin():
         return
     text = ref.read_text(encoding="utf-8")
     check("vendored headers name the shipped OptiScaler version",
-          f"v{constants.OPTISCALER_VERSION}" in text,
-          f"want v{constants.OPTISCALER_VERSION} in SOURCE_COMMIT.txt")
+          f"v{constants.LIVE_OPTISCALER_VERSION}" in text,
+          f"want historical live ABI v{constants.LIVE_OPTISCALER_VERSION} in SOURCE_COMMIT.txt")
     check("the shipped archive matches the pinned version",
           constants.OPTISCALER_VERSION in constants.PAYLOAD_ARCHIVE,
           constants.PAYLOAD_ARCHIVE)
@@ -1677,8 +1686,10 @@ def check_asi_wide_formats():
     check("control paths are built without printf", "JoinPath(g_statusPath" in source)
 
     built = ROOT / "bin" / "decky_optiscaler_live.asi"
-    check("the built plugin is present", built.is_file())
-    if built.is_file():
+    from optiscaler.constants import LIVE_CONTROL_SUPPORTED
+    check("a compiled ASI exists only for a validated ABI",
+          built.is_file() if LIVE_CONTROL_SUPPORTED else not built.exists())
+    if LIVE_CONTROL_SUPPORTED and built.is_file():
         data = built.read_bytes()
         check("the built plugin is a windows dll", data[:2] == b"MZ")
         # If a wide format ever comes back, so does this import.
@@ -2226,10 +2237,9 @@ def check_reframework():
         root = Path(tmp)
         game = root / "game"
         game.mkdir()
-        payload = root / "payload"
-        payload.mkdir()
-        (payload / "OptiScaler.dll").write_bytes(b"OptiScaler" + b"\0" * (5 << 20))
-        (payload / INI_NAME).write_text("[Upscalers]\nDx12Upscaler=auto\n")
+        from optiscaler.payload import Payload
+        from optiscaler.constants import PAYLOAD_ARCHIVE
+        payload = Payload(ROOT / "bin" / PAYLOAD_ARCHIVE, root / "runtime").ensure()
         source = root / "ref"
         source.mkdir()
         (source / REFRAMEWORK_DLL).write_bytes(b"the REFramework build")
@@ -2258,10 +2268,9 @@ def check_reframework():
         root = Path(tmp)
         game = root / "game"
         game.mkdir()
-        payload = root / "payload"
-        payload.mkdir()
-        (payload / "OptiScaler.dll").write_bytes(b"OptiScaler" + b"\0" * (5 << 20))
-        (payload / INI_NAME).write_text("[Upscalers]\nDx12Upscaler=auto\n")
+        from optiscaler.payload import Payload
+        from optiscaler.constants import PAYLOAD_ARCHIVE
+        payload = Payload(ROOT / "bin" / PAYLOAD_ARCHIVE, root / "runtime").ensure()
         installer.install(str(game), str(payload), "dxgi.dll", False)
         source = root / "ref"
         source.mkdir()
@@ -2652,15 +2661,15 @@ def check_option_validation():
     presets = {
         "fsr4": [("Upscalers", "Dx12Upscaler", "fsr31"), ("Upscalers", "Dx11Upscaler", "fsr31_12"),
                  ("Upscalers", "VulkanUpscaler", "fsr31_12"), ("FSR", "Fsr4Update", "true"),
-                 ("FSR", "UpscalerIndex", "0"), ("FSR", "Fsr4ForceEnableInt8", "false")],
+                 ("FSR", "UpscalerIndex", "0"), ("FSR", "Fsr4ForceEnableInt8", "0")],
         "fsr4-int8": [("Upscalers", "Dx12Upscaler", "fsr31"),
                       ("Upscalers", "Dx11Upscaler", "fsr31_12"),
                       ("Upscalers", "VulkanUpscaler", "fsr31_12"),
-                      ("FSR", "Fsr4Update", "auto"), ("FSR", "Fsr4ForceEnableInt8", "true"),
+                      ("FSR", "Fsr4Update", "auto"), ("FSR", "Fsr4ForceEnableInt8", "1"),
                       ("FSR", "UpscalerIndex", "0")],
         "fsr31": [("Upscalers", "Dx12Upscaler", "fsr31"), ("Upscalers", "Dx11Upscaler", "fsr31"),
                   ("Upscalers", "VulkanUpscaler", "fsr31"), ("FSR", "Fsr4Update", "false"),
-                  ("FSR", "UpscalerIndex", "1"), ("FSR", "Fsr4ForceEnableInt8", "false")],
+                  ("FSR", "UpscalerIndex", "1"), ("FSR", "Fsr4ForceEnableInt8", "0")],
         "xess": [("Upscalers", "Dx12Upscaler", "xess"), ("Upscalers", "Dx11Upscaler", "xess_12"),
                  ("Upscalers", "VulkanUpscaler", "xess")],
     }
@@ -2670,19 +2679,50 @@ def check_option_validation():
         check(f"every key the {name} preset writes is accepted", not bad, bad)
 
 
+def check_beta_live_disabled():
+    """The beta must refuse an unvalidated ABI even with a fresh legacy heartbeat.
+
+    Historical positive live tests below are retained for a future supported ABI;
+    they are not evidence that the new core supports the archived ASI.
+    """
+    from optiscaler import live
+    from optiscaler.constants import LIVE_CONTROL_SUPPORTED
+    print("\nExperimental runtime live-control boundary")
+    check("beta explicitly disables the unvalidated live ABI", not LIVE_CONTROL_SUPPORTED)
+    check("incompatible compiled ASI is not distributed", not (ROOT / "bin" / live.ASI_NAME).exists())
+    with tempfile.TemporaryDirectory(prefix="optiscaler-beta-live-") as temporary:
+        target = Path(temporary)
+        source = target / "legacy.asi"; source.write_bytes(b"synthetic old ASI")
+        (target / live.STATUS_FILE).write_text("status ready\nready 1\nseq 1\n")
+        state = live.status(target)
+        check("a fresh old heartbeat is not an attachment", not state.get("attached"))
+        check("repair refuses the old ABI", not live.install_asi(target, source).get("ok"))
+        check("the generic ASI entry cannot bypass the gate",
+              not live.install_plugin_asi(target, source, live.ASI_NAME).get("ok"))
+        result = live.apply_changes(target, [{"section": "FrameGen", "key": "Enabled", "value": "false"}])
+        check("ordinary writes do not send live commands", not result.get("sent"))
+        check("direct backend switching is refused", not live.switch_backend(target, "fsr31").get("ok"))
+        check("no old ASI or command was created", not live.asi_path(target).exists()
+              and not (target / live.CMD_FILE).exists())
+
+
 def main():
     logging.basicConfig(level=logging.ERROR)
     asyncio.run(run())
-    check_live_control()
-    check_live_diagnostics()
+    from optiscaler.constants import LIVE_CONTROL_SUPPORTED
+    if LIVE_CONTROL_SUPPORTED:
+        check_live_control()
+        check_live_diagnostics()
+        check_asi_staleness()
+        check_live_frame_rates()
+    else:
+        check_beta_live_disabled()
     check_remembered_choices()
     check_launch_record()
     check_launch_options_read()
     check_non_steam_shortcut()
     check_asi_reporting()
-    check_asi_staleness()
     check_reported_folder()
-    check_live_frame_rates()
     check_wiki_failure_reporting()
     check_wiki_cache()
     check_wiki_transport()

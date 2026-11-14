@@ -41,8 +41,8 @@ jobs:
           python3 scripts/generate_schema.py
           git diff --exit-code -- src/config/generatedSchema.ts py_modules/optiscaler/schema_generated.py
 
-      # The ASI reads OptiScaler's memory at offsets the compiler computes from
-      # this mirror, so a stale one is a silently inert live-control feature.
+      # Retain reproducible historical 0.9.4 ABI references for future ASI work.
+      # The incompatible compiled ASI is excluded from this beta.
       - name: Check generated ASI layout is up to date
         run: |
           python3 scripts/generate_asi_layout.py
@@ -57,8 +57,10 @@ jobs:
       - name: Steam Deck FSR4 lifecycle
         run: python3 scripts/test_fsr4.py
 
-      # Includes check_version_pin(), which holds asi/optiscaler_ref/ to the
-      # exact OptiScaler tag whose release sits in bin/.
+      - name: Recovery and PBZ regression
+        run: python3 scripts/test_recovery.py
+
+      # Checks the current runtime pin and the separate historical ASI reference.
       - name: Backend selftest
         run: python3 scripts/selftest.py
 
@@ -80,8 +82,17 @@ jobs:
       - name: Live-controls harness
         run: HARNESS=live-fields.tsx node testharness/build-and-run.mjs
 
+      - name: Queue, launch options and recovery UI regressions
+        run: |
+          HARNESS=use-config.tsx node testharness/build-and-run.mjs
+          HARNESS=launch-options.tsx node testharness/build-and-run.mjs
+          HARNESS=recovery-ui.tsx node testharness/build-and-run.mjs
+
       - name: Package
         run: python3 scripts/package.py
+
+      - name: Final zip offline lifecycle
+        run: python3 scripts/verify_package.py 'out/Decky OptiScaler.zip'
 
       - uses: actions/upload-artifact@v7
         with:

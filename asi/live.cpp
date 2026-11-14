@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#include <vector>
 
 #include "msvc_abi.h"
 #include "generated/config_mirror.h"
@@ -197,14 +198,31 @@ struct ScopedScanCache {
  * exports both an NVNGX entry point and the wininet AppCache surface.
  */
 static HMODULE FindOptiScalerModule() {
-    HMODULE mods[1024];
-    DWORD needed = 0;
-    if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) return NULL;
-    size_t count = needed / sizeof(HMODULE);
-    for (size_t i = 0; i < count; i++) {
-        if (GetProcAddress(mods[i], "NVSDK_NGX_D3D12_Init") &&
-            GetProcAddress(mods[i], "AppCacheCheckManifest"))
-            return mods[i];
+    std::vector<HMODULE> mods(1024);
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        DWORD needed = 0;
+        const DWORD capacity = (DWORD) (mods.size() * sizeof(HMODULE));
+        if (!EnumProcessModules(GetCurrentProcess(), mods.data(), capacity, &needed)) return NULL;
+        if (needed > capacity) {
+            size_t requested = (needed + sizeof(HMODULE) - 1) / sizeof(HMODULE);
+            if (requested <= mods.size()) requested = mods.size() * 2;
+            if (requested > 65536) return NULL;
+            mods.resize(requested);
+            continue;
+        }
+
+        // ``needed`` is the byte count required for the complete module list,
+        // not a guarantee that the output buffer contains that many handles.
+        // Keep the scan bound tied to the actual allocation even if the API's
+        // accounting changes or the list shrinks between calls.
+        size_t count = needed / sizeof(HMODULE);
+        if (count > mods.size()) count = mods.size();
+        for (size_t i = 0; i < count; i++) {
+            if (GetProcAddress(mods[i], "NVSDK_NGX_D3D12_Init") &&
+                GetProcAddress(mods[i], "AppCacheCheckManifest"))
+                return mods[i];
+        }
+        return NULL;
     }
     return NULL;
 }

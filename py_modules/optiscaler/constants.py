@@ -1,8 +1,8 @@
 """Shared constants for the Decky OptiScaler plugin."""
 
-OPTISCALER_VERSION = "0.9.4"
-PAYLOAD_ARCHIVE = "OptiScaler-0.9.4.7z"
-PAYLOAD_SHA256 = "575cb4df866116093df75af607e37fd70e10f5163e0f23fd5c804142e80ef0ad"
+OPTISCALER_VERSION = "0.9.5-pre5"
+PAYLOAD_ARCHIVE = "OptiScaler-0.9.5-pre5.7z"
+PAYLOAD_SHA256 = "05b10dfe5ab7d79a56bc553d66d0def1d0f6bdcd04ed11de80c0909964bb47a3"
 
 INI_NAME = "OptiScaler.ini"
 LOG_NAME = "OptiScaler.log"
@@ -259,3 +259,10 @@ STEAM_ROOTS = [
     ".steam/root",
     ".var/app/com.valvesoftware.Steam/data/Steam",
 ]
+
+# Live ABI remains pinned to 0.9.4 and is deliberately unavailable in this beta.
+LIVE_CONTROL_SUPPORTED = False
+LIVE_CONTROL_REASON = "Live control is not supported with this experimental runtime. Save settings and restart the game."
+LIVE_OPTISCALER_VERSION = "0.9.4"
+LEGACY_LIVE_ASI_SHA256 = "ca4db054e42864a4bf754a18dc6288e7b9be888e24d119916ddedaef3c5de207"
+RUNTIME_DLL_SHA256 = "bd6fe5e7defdf7520ecd7a45eb3b5fe173d70551af5ad4a21b2837dd5d2e8a28"

@@ -22,8 +22,8 @@ from .constants import (
 BUNDLED_BUILD = {
     "id": FSR4_BUNDLED_BUILD_ID,
     "label": "Bundled (FidelityFX SDK 4.1.1)",
-    "note": "The build the OptiScaler release ships. Reaches FSR 4 through the "
-            "INT8 override on RDNA 2.",
+    "note": "Stock 4.1.1 SDK from the stable support bundle. Choose the community "
+            "4.1.1b ghosting fix for the Steam Deck experiment.",
     "file": FFX_UPSCALER_DLL,
     "file_sha256": FSR4_BUNDLED_FILE_SHA256,
     "file_bytes": FSR4_BUNDLED_FILE_BYTES,

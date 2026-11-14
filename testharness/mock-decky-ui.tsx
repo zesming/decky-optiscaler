@@ -111,7 +111,9 @@ export const Field = box("Field");
 export const Focusable = box("Focusable");
 export const DialogButton = box("DialogButton");
 export const ConfirmModal = box("ConfirmModal");
-export function showModal(_modal: any) {
+export const shownModals: any[] = [];
+export function showModal(modal: any) {
+  shownModals.push(modal);
   return { Close() {}, Update() {} };
 }
 export const Dropdown = box("Dropdown");

@@ -1,50 +1,11 @@
-# Steam Deck FSR 4.1.1b
+# Steam Deck FSR 4.1
 
-Close the game, install OptiScaler through the plugin if needed, and select
-**FSR 4.1.1b — Steam Deck** under Basic → Override upscaler with. The first use
-requires a download (about 3.5 MB); later games reuse the verified cached DLL.
-Download or validation failure leaves the previous DLL and settings intact.
+Use the [PBZ experiment guide](phantom-blade-zero.md) for installation, required game settings, validation and complete restoration.
 
-This option installs the community `amd_fidelityfx_upscaler_dx12.dll` from
-[the3rdparty1917/fsr4xyz 4.1.1b](https://github.com/the3rdparty1917/fsr4xyz/releases/tag/4.1.1b).
-The release describes an RDNA2 ghosting fix. Archive and DLL SHA-256 values are
-pinned in the plugin. The SDK's version resource still says 4.1.1, so Setup
-identifies the build by its bytes instead of relying on that version string.
+The stock support bundle contains the FidelityFX SDK 4.1.1 DLL. Its file presence does not prove the game is running FSR4 or the intended model. This beta also bundles the separately verified community **4.1.1b INT8 RDNA2 ghosting fix**, with its identity determined by SHA-256 rather than the unchanged version resource.
 
-The plugin still bundles OptiScaler runtime **0.9.4**, including the original
-SDK **4.1.1**. OptiScaler Client **1.0.7** is a separate management application;
-it is not required or installed by this plugin.
+The new core reads `FSR.Fsr4ForceEnableInt8` as a model number: `0` disabled, `1` generic INT8, `2` native Navi2 INT8, `3` Lite. The pinned community preset uses **1**. Merely writing 2 does not add a missing native Navi2 model to an old DLL. Legacy true/false values are migrated only during runtime upgrade, preserving the rest of the INI; an explicit rollback restores the original bytes.
 
-## Settings and verification
+Basic's FSR preset remains independent of frame generation. The explicit PBZ / LSFG experiment also switches OptiScaler FG off and lists the required in-game steps. Restoring the stock FSR DLL does not restore the whole experiment; use **Restore previous install** for that, or **Remove** to restore the earliest original game files and recorded launch options.
 
-The option selects the FidelityFX backend (`fsr31` for DX12), sets
-`Fsr4ForceEnableInt8=true`, `UpscalerIndex=0`, and resets `Fsr4Update` and
-`Fsr4Preset` to `auto`. DX11/Vulkan select the existing DX12 bridge backend.
-INT8 initialization requires a fresh game launch. Per-game compatibility still
-applies; the preset cannot add upscaler inputs to an unsupported game.
-
-Launch the game and use its supported upscaler input (for example XeSS in the
-Cyberpunk setup tested here). Enable the FSR watermark in OptiScaler to confirm
-`FSR4-I8`; plain FSR3 indicates fallback. Setup identifies the installed patch,
-while the watermark identifies the model actually running.
-
-This is experimental community support for RDNA2. Evaluate motion/ghosting,
-image quality and base frame rate in the same scene before and after enabling.
-It does not fix or enable FSR4 frame generation. You may keep FSR3 frame generation
-with FSR4 upscaling; test stability separately. Avoid modified DLLs in games whose
-anti-cheat forbids them.
-
-## Switching back
-
-Choose FSR 3.X or another upscaler in Basic settings to change the active backend.
-The community DLL stays installed for later use. To remove the patch, close the
-game and choose **Restore bundled upscaler** in Setup. This keeps settings intact;
-INT8 configured by hand or retained after restore is labelled **FSR 4 INT8 (manual)**.
-
-Reinstall preserves a verified community DLL. If that DLL is missing or altered,
-reinstall stops with repair instructions instead of silently replacing the patch.
-Select the Steam Deck option again to repair it, or restore the bundled DLL.
-Uninstall restores the game's original backed-up files, not the OptiScaler SDK.
-
-The source release and pinned hashes should be reviewed before updating to a new
-community build. Older 4.0.2 community variants are outside this feature's scope.
+All settings require a game restart in this beta. Its new runtime is not compatible with the archived Decky live ASI.

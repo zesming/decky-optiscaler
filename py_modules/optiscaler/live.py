@@ -18,10 +18,11 @@ command file five times a second.
 
 import os
 import re
+import stat
 import time
 from pathlib import Path
 
-from .constants import BACKUP_DIR
+from . import constants
 
 ASI_NAME = "decky_optiscaler_live.asi"
 PLUGIN_SUBDIR = "plugins"
@@ -241,12 +242,21 @@ def install_plugin_asi(target_dir, source, name, logger=None):
     OptiScaler loads every .asi in this folder once ``LoadAsiPlugins`` is on,
     which is how both our live-control module and OptiPatcher get in.
     """
+    if name == ASI_NAME and not getattr(constants, "LIVE_CONTROL_SUPPORTED", False):
+        return {"ok": False, "error": getattr(
+            constants, "LIVE_CONTROL_REASON", "Live control is disabled for this runtime."
+        ), "supported": False}
+    if not isinstance(name, str) or not name or name in (".", "..") or "/" in name or "\\" in name:
+        return {"ok": False, "error": f"invalid ASI filename: {name!r}"}
     source = Path(source)
     if not source.is_file():
         return {"ok": False, "error": f"{name} missing at {source}"}
-    destination = Path(target_dir) / PLUGIN_SUBDIR / name
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(source.read_bytes())
+    from .installer import atomic_copy, require_stopped_target
+
+    target = Path(target_dir).resolve()
+    destination = target / PLUGIN_SUBDIR / name
+    require_stopped_target(target)
+    atomic_copy(source, destination, target_dir=target)
     if logger:
         logger.info("installed %s at %s", name, destination)
     return {"ok": True, "path": str(destination)}
@@ -257,30 +267,42 @@ def install_asi(target_dir, source, logger=None):
     return install_plugin_asi(target_dir, source, ASI_NAME, logger)
 
 
-def remove_asi(target_dir, logger=None):
+def remove_asi(target_dir, logger=None, allow_owned_asi=False, owned_paths=()):
     """Remove the ASI and every file the live channel created."""
-    removed = []
-    for path in (
-        asi_path(target_dir),
-        _control_path(target_dir, CMD_FILE),
-        _control_path(target_dir, STATUS_FILE),
-        _control_path(target_dir, LOG_FILE),
-    ):
-        try:
-            if path.is_file():
-                path.unlink()
-                removed.append(path.name)
-        except OSError as exc:
-            if logger:
-                logger.warning("could not remove %s: %s", path, exc)
+    from .installer import (
+        _assert_known_live_asi, _existing_mode, _safe_path, _TRANSACTIONS,
+        require_stopped_target, target_transaction,
+    )
 
-    # Only clean the plugins folder up if we are the ones who created it.
-    plugin_dir = Path(target_dir) / PLUGIN_SUBDIR
-    try:
-        if plugin_dir.is_dir() and not any(plugin_dir.iterdir()):
-            plugin_dir.rmdir()
-    except OSError:
-        pass
+    target = Path(target_dir).resolve()
+    if str(target) not in getattr(_TRANSACTIONS, "targets", {}):
+        with target_transaction(target, require_stopped=True):
+            return remove_asi(target, logger, allow_owned_asi, owned_paths)
+    require_stopped_target(target)
+    installed_path = _safe_path(target, f"{PLUGIN_SUBDIR}/{ASI_NAME}")
+    owned = set(owned_paths or ())
+    if allow_owned_asi:
+        owned.add(f"{PLUGIN_SUBDIR}/{ASI_NAME}")
+    removed = []
+    managed = (
+        (f"{PLUGIN_SUBDIR}/{ASI_NAME}", installed_path),
+        (CMD_FILE, _safe_path(target, CMD_FILE)),
+        (STATUS_FILE, _safe_path(target, STATUS_FILE)),
+        (LOG_FILE, _safe_path(target, LOG_FILE)),
+    )
+    for relative, path in managed:
+        if relative not in owned:
+            continue
+        mode = _existing_mode(path)
+        if mode is None:
+            continue
+        if not stat.S_ISREG(mode):
+            raise ValueError(f"refusing to remove non-file live-control path: {path}")
+        if relative == f"{PLUGIN_SUBDIR}/{ASI_NAME}":
+            _assert_known_live_asi(path)
+        require_stopped_target(target)
+        path.unlink()
+        removed.append(relative)
     return {"ok": True, "removed": removed}
 
 
@@ -454,8 +476,15 @@ def _read_measurements(report, raw):
 
 def status(target_dir, source=None):
     """What the in-game side is doing right now."""
+    supported = bool(getattr(constants, "LIVE_CONTROL_SUPPORTED", False))
+    reason = None if supported else getattr(
+        constants, "LIVE_CONTROL_REASON", "Live control is disabled for this runtime."
+    )
     path = _control_path(target_dir, STATUS_FILE)
     report = {
+        "supported": supported,
+        "capabilities": supported,
+        "reason": reason,
         "asi_installed": installed(target_dir),
         # False when the game holds an older build of the in-game plugin than
         # this one ships, which is what an updated Decky plugin leaves behind.
@@ -463,6 +492,8 @@ def status(target_dir, source=None):
         "load_enabled": load_enabled(target_dir),
         "loaded_by_optiscaler": loaded_by_optiscaler(target_dir),
         "attached": False,
+        "legacy_running": False,
+        "ready": False,
         "state": "absent",
         "error": None,
         "seq": None,
@@ -516,6 +547,13 @@ def status(target_dir, source=None):
     report["state"] = raw.get("status", "unknown")
     report["error"] = raw.get("error") or None
     report["seq"] = raw.get("seq")
+    # This heartbeat can come from the repository's dormant 0.9.4 binary. It
+    # remains useful as a stop-game hint, but it must never claim that the beta
+    # runtime is attached or grant capabilities.
+    if not supported:
+        report["legacy_running"] = report["state"] in ("ready", "loaded", "searching") \
+            and age < STATUS_STALE_SECONDS
+        return report
     _read_measurements(report, raw)
     # Switching needs both halves of the overlay's own path: the backend map to
     # mark, and State::newBackend to write. A null either side means frame
@@ -596,6 +634,12 @@ def apply_changes(target_dir, changes):
     ``changes`` are the same {section, key, value} dicts the config writer uses.
     Returns which ones were sent and which need a restart regardless.
     """
+    if not getattr(constants, "LIVE_CONTROL_SUPPORTED", False):
+        return {"ok": False, "error": getattr(
+            constants, "LIVE_CONTROL_REASON", "Live control is disabled for this runtime."
+        ), "sent": False, "applied": [],
+            "deferred": [f"{change.get('section', '')}.{change.get('key', '')}"
+                         for change in (changes or [])]}
     live, deferred = [], []
     backend_codes = {}
     ffx_upscaler = None
@@ -692,6 +736,10 @@ def switch_backend(target_dir, code):
     side effect of editing a setting: OptiScaler rebuilds the upscaler when it
     sees this, which costs a frame.
     """
+    if not getattr(constants, "LIVE_CONTROL_SUPPORTED", False):
+        return {"ok": False, "error": getattr(
+            constants, "LIVE_CONTROL_REASON", "Live control is disabled for this runtime."
+        ), "sent": False}
     code = str(code).strip().lower()
     if code not in BACKEND_CODES:
         return {"ok": False, "error": f"not an OptiScaler backend id: {code}"}

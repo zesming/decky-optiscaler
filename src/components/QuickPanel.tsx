@@ -1,6 +1,6 @@
 import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { toaster } from "@decky/api";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { resolveGame } from "../shortcuts";
 import { useAutoPlan } from "../hooks/useAutoPlan";
 import { useConfig } from "../hooks/useConfig";
@@ -51,6 +51,7 @@ export function QuickPanel({
 
       {tab === "now" ? (
         <NowPlayingTab
+          key={runningGame?.appid ?? "none"}
           runningGame={runningGame}
           onOpenManager={onOpenManager}
           onBrowse={() => setTab("games")}
@@ -87,17 +88,24 @@ function NowPlayingTab({
   const [detail, setDetail] = useState<GameDetail | null>(null);
   const [resolving, setResolving] = useState(false);
   const [notFound, setNotFound] = useState(false);
+  const activeAppid = useRef(runningGame?.appid ?? null);
+  activeAppid.current = runningGame?.appid ?? null;
+  const resolveSequence = useRef(0);
 
   const resolve = useCallback(async () => {
+    const request = ++resolveSequence.current;
+    const appid = runningGame?.appid ?? null;
     if (!runningGame) {
       setDetail(null);
       setNotFound(false);
+      setResolving(false);
       return;
     }
     setResolving(true);
     setNotFound(false);
     try {
       const result = await resolveGame(runningGame.appid);
+      if (activeAppid.current !== appid || resolveSequence.current !== request) return;
       if (result.found && result.detail) {
         setDetail(result.detail);
       } else {
@@ -105,9 +113,11 @@ function NowPlayingTab({
         setNotFound(true);
       }
     } catch {
-      setNotFound(true);
+      if (activeAppid.current === appid && resolveSequence.current === request) setNotFound(true);
     } finally {
-      setResolving(false);
+      if (activeAppid.current === appid && resolveSequence.current === request) {
+        setResolving(false);
+      }
     }
   }, [runningGame]);
 
@@ -118,10 +128,18 @@ function NowPlayingTab({
   const installed = Boolean(detail?.install.installed);
   const targetDir = installed && detail ? detail.install.path : null;
   // Re-read after the game exits so overlay-side Save is not overwritten.
-  const config = useConfig(targetDir, installed, runningGame?.appid ?? null);
+  const config = useConfig(
+    targetDir,
+    installed,
+    runningGame?.appid ?? null,
+    `quick-panel:${runningGame?.appid ?? "none"}`,
+    { gamePath: detail?.path ?? "", appid: runningGame ? String(runningGame.appid) : null },
+  );
   // This tab is only ever shown over a running game, so the live channel is
   // always worth polling here.
   const { status: live, refresh: refreshLive } = useLiveStatus(targetDir, Boolean(runningGame));
+  const runtimeCurrent =
+    detail?.install.runtime_current === true && config.runtimeCurrent === true;
   // Read-only over a running game: the mode is chosen on the full page, where
   // the plan it comes from can actually be read.
   const { plan, auto } = useAutoPlan(detail?.path ?? null, detail?.name ?? null, installed);
@@ -202,7 +220,17 @@ function NowPlayingTab({
           {config.error ? (
             <PanelSection>
               <PanelSectionRow>
-                <Notice tone="error">{config.error}</Notice>
+                <Notice tone="error" title="Could not save settings">{config.error}</Notice>
+              </PanelSectionRow>
+            </PanelSection>
+          ) : null}
+
+          {!runtimeCurrent ? (
+            <PanelSection>
+              <PanelSectionRow>
+                <Notice tone="warn" title="Settings are read-only">
+                  Upgrade the OptiScaler runtime in Setup before changing settings.
+                </Notice>
               </PanelSectionRow>
             </PanelSection>
           ) : null}
@@ -212,6 +240,9 @@ function NowPlayingTab({
           ) : (
             <BasicPanel
               values={config.values}
+              disabled={
+                config.loading || config.saving || !runtimeCurrent
+              }
               gpu={detail.gpu}
               live={live}
               ffx={detail.install.fsr4?.ffx}
@@ -279,6 +310,7 @@ function InstallPill({
 /** Whether the in-game plugin is answering, shown wherever the game is. */
 function LivePill({ live }: Readonly<{ live: LiveStatus | null }>) {
   if (!live) return null;
+  if (live.supported !== true) return <Pill color="#5a4a20">live unavailable</Pill>;
   if (live.attached) {
     // An in-game plugin older than the one this build ships attaches and
     // answers normally, so the only sign of it is what it leaves out. Say so

@@ -16,7 +16,7 @@ import { act } from "react";
 import { fixtures } from "@decky/api";
 import { GENERATED_OPTIONS } from "../src/config/generatedSchema";
 import { QuickPanel } from "../src/components/QuickPanel";
-import { forgetWrites } from "../src/config/writeRecord";
+import { beginTargetFlush, finishTargetFlush, forgetWrites, getTargetConfigQueue } from "../src/config/writeRecord";
 
 // ---- a backend that keeps state -------------------------------------------
 const ini: Record<string, Record<string, string>> = {};
@@ -68,6 +68,7 @@ const detail = {
     path: "/games/Cyberpunk 2077/bin/x64",
     installed: true, filename: "dxgi.dll", managed: true, version: "0.9.4",
     ini_present: true, log_present: true, candidates: ["dxgi.dll"], extra_proxies: [],
+    runtime_current: true,
     backed_up: [],
     // The library the shipped OptiScaler release actually carries, which is a
     // later version than the reference ini it documents itself with.
@@ -99,6 +100,8 @@ let liveCountedFps = 40.4;
 let installedFsr4Build = "bundled";
 let fsr4SetupFails = true;
 Object.assign(fixtures, {
+  create_restore_point: { ok: true, available: true },
+  get_launch_options: { found: true, value: "", source: "test" },
   find_running_game: () => ({ found: true, appid: "1091500", detail }),
   get_auto_plan: { recommendation: { matched: false }, plan: { available: false } },
   get_pref: { key: "auto", value: null },
@@ -106,13 +109,13 @@ Object.assign(fixtures, {
     if (fsr4SetupFails) return { ok: false, error: "Close the game before changing the FSR 4 build." };
     installedFsr4Build = "4.1.1b";
     setIni({ Upscalers: { Dx12Upscaler: "fsr31" },
-      FSR: { Fsr4ForceEnableInt8: "true", Fsr4Update: "auto", UpscalerIndex: "0" } });
+      FSR: { Fsr4ForceEnableInt8: "1", Fsr4Update: "auto", UpscalerIndex: "0" } });
     return { ok: true };
   },
   read_config: () => ({
     fsr4_build: installedFsr4Build,
     ok: true, path: "/x/OptiScaler.ini",
-    values: JSON.parse(JSON.stringify(ini)), modified: 1,
+    values: JSON.parse(JSON.stringify(ini)), modified: 1, runtime_current: true,
   }),
   write_config: (_dir: string, changes: any[]) => {
     const applied: any[] = [];
@@ -130,6 +133,7 @@ Object.assign(fixtures, {
     return { ok: true, applied, rejected, live: { sent: true, deferred: [], attached: true } };
   },
   get_live_status: () => ({
+    supported: true,
     asi_installed: true, asi_available: true, asi_current: true,
     attached: true, ready: true, state: "ready",
     load_enabled: true, loaded_by_optiscaler: true, error: null, seq: "1",
@@ -191,6 +195,8 @@ function setIni(entries: Record<string, Record<string, string>>) {
     ini[section] = { ...(ini[section] ?? {}), ...keys };
   }
   forgetWrites(detail.install.path);
+  const queue = getTargetConfigQueue(detail.install.path);
+  finishTargetFlush(queue, beginTargetFlush(queue, queue.revision, true));
 }
 
 /** The same trick for the device: which GPU is under the game decides whether
@@ -199,6 +205,8 @@ function setIni(entries: Record<string, Record<string, string>>) {
 function setGpu(gpu: typeof detail.gpu) {
   detail.gpu = gpu;
   forgetWrites(detail.install.path);
+  const queue = getTargetConfigQueue(detail.install.path);
+  finishTargetFlush(queue, beginTargetFlush(queue, queue.revision, true));
 }
 
 const all = (node: Element, selector: string) => Array.from(node.querySelectorAll(selector));
@@ -323,7 +331,7 @@ const tile = (host: Element, label: string) => {
   // now and leave the thing that was asked for waiting for a restart.
   setIni({
     Upscalers: { Dx12Upscaler: "fsr31" },
-    FSR: { Fsr4ForceEnableInt8: "true", Fsr4Update: "auto", UpscalerIndex: "0" },
+    FSR: { Fsr4ForceEnableInt8: "1", Fsr4Update: "auto", UpscalerIndex: "0" },
   });
   // A backend the game is not on, so a switch would otherwise be on offer.
   liveBackend = "xess";
@@ -364,7 +372,7 @@ const tile = (host: Element, label: string) => {
 
   await act(async () => root5.unmount());
   liveBackend = "fsr31";
-  setIni({ FSR: { Fsr4ForceEnableInt8: "false", Fsr4Update: "false" } });
+  setIni({ FSR: { Fsr4ForceEnableInt8: "0", Fsr4Update: "false" } });
   await settle(200);
 
   console.log("=== a 4.0.2 upscaler in the folder ===");
@@ -377,7 +385,7 @@ const tile = (host: Element, label: string) => {
   detail.install.fsr4.ffx.version = "4.0.2.0";
   setIni({
     Upscalers: { Dx12Upscaler: "fsr31" },
-    FSR: { Fsr4ForceEnableInt8: "false", Fsr4Update: "false", UpscalerIndex: "1" },
+    FSR: { Fsr4ForceEnableInt8: "0", Fsr4Update: "false", UpscalerIndex: "1" },
   });
   const host6 = document.createElement("div");
   document.body.appendChild(host6);
@@ -523,6 +531,40 @@ const tile = (host: Element, label: string) => {
   check("a later edit sticks", selected(host4, "Override upscaler with"), "xess");
   await act(async () => root4.unmount());
 
+  console.log("=== failed config RPCs restore the authoritative ini ===");
+  setIni({ Upscalers: { Dx12Upscaler: "fsr31" } });
+  const successfulWrite = fixtures.write_config;
+  fixtures.write_config = () => ({ ok: false, error: "disk is read-only" });
+  let failedPanel = await open();
+  await act(async () => {
+    (all(control(failedPanel.node, "Override upscaler with"), '[data-opt-value="xess"]')[0] as HTMLElement)
+      .click();
+  });
+  await settle(80);
+  check("an ok:false RPC rolls the control back to disk",
+    selected(failedPanel.node, "Override upscaler with"), "fsr31");
+  check("the full RPC failure is visible",
+    failedPanel.node.textContent?.includes("disk is read-only"), true);
+  await act(async () => failedPanel.root.unmount());
+  failedPanel = await open();
+  check("reopening does not resurrect the failed optimistic value",
+    selected(failedPanel.node, "Override upscaler with"), "fsr31");
+  await act(async () => failedPanel.root.unmount());
+
+  fixtures.write_config = () => { throw new Error("Decky RPC disconnected"); };
+  failedPanel = await open();
+  await act(async () => {
+    (all(control(failedPanel.node, "Override upscaler with"), '[data-opt-value="xess"]')[0] as HTMLElement)
+      .click();
+  });
+  await settle(80);
+  check("a rejected RPC promise also restores the file value",
+    selected(failedPanel.node, "Override upscaler with"), "fsr31");
+  check("a rejected RPC promise explains the failure",
+    failedPanel.node.textContent?.includes("Decky RPC disconnected"), true);
+  await act(async () => failedPanel.root.unmount());
+  fixtures.write_config = successfulWrite;
+
   console.log("=== closing the panel while the write is in flight ===");
   // Closing the Quick Access panel unmounts everything, which is what you do to
   // look at the game after changing something. Reopening starts a read that can
@@ -545,7 +587,7 @@ const tile = (host: Element, label: string) => {
     return { ok: true, applied: changes, rejected: [], live: { sent: true, deferred: [] } };
   };
 
-  const open = async () => {
+  async function open() {
     const node = document.createElement("div");
     document.body.appendChild(node);
     const r = createRoot(node);
@@ -559,7 +601,7 @@ const tile = (host: Element, label: string) => {
     });
     await settle();
     return { node, root: r };
-  };
+  }
 
   let panel = await open();
   check("opens on XeSS", selected(panel.node, "Override upscaler with"), "xess");
@@ -676,6 +718,63 @@ const tile = (host: Element, label: string) => {
         control(panel.node, "FSR version")?.getAttribute("data-shown"), "FSR 4.1.1 *");
   fixtures.get_live_status = promptly;
   await act(async () => panel.root.unmount());
+
+  console.log("=== switching running games while a lookup is pending ===");
+  const originalFind = fixtures.find_running_game;
+  const originalWrite = fixtures.write_config;
+  let finishA: (answer: any) => void = () => {};
+  let finishB: (answer: any) => void = () => {};
+  fixtures.find_running_game = (appid: string) => new Promise((resolve) => {
+    if (appid === "1091500") finishA = resolve;
+    else finishB = resolve;
+  });
+  const targetB = {
+    ...detail,
+    path: "/games/Test B",
+    name: "Test B",
+    target: "/games/Test B/bin",
+    install: { ...detail.install, path: "/games/Test B/bin" },
+  };
+  const writes: string[] = [];
+  fixtures.write_config = (dir: string, changes: any[]) => {
+    writes.push(dir);
+    return { ok: true, applied: changes, rejected: [], live: { sent: false, deferred: changes } };
+  };
+  await act(async () => {
+    root.render(
+      <QuickPanel
+        runningGame={{ appid: 1091500, name: "Cyberpunk 2077", gameid: "1091500" }}
+        onOpenManager={() => {}}
+      />
+    );
+  });
+  await settle();
+  await act(async () => {
+    root.render(
+      <QuickPanel
+        runningGame={{ appid: 2358720, name: "Test B", gameid: "2358720" }}
+        onOpenManager={() => {}}
+      />
+    );
+  });
+  await settle();
+  check("old controls are hidden while the new target resolves",
+    all(host, '[data-mock="DropdownItem"]').length, 0);
+  await act(async () => finishB({ found: true, appid: "2358720", detail: targetB }));
+  await settle(80);
+  await act(async () => finishA({ found: true, appid: "1091500", detail }));
+  await settle(80);
+  check("the late lookup for game A cannot replace game B",
+    host.textContent?.includes("Test B") && Boolean(control(host, "Override upscaler with")), true);
+  const targetControl = control(host, "Override upscaler with");
+  await act(async () => {
+    (all(targetControl!, '[data-opt-value="xess"]')[0] as HTMLElement).click();
+  });
+  await settle(100);
+  check("a setting chosen after the switch writes only to game B",
+    writes.length > 0 && writes.every((dir) => dir === "/games/Test B/bin"), true);
+  fixtures.find_running_game = originalFind;
+  fixtures.write_config = originalWrite;
 
   const real = errors.filter((e) => !e.includes("not wrapped in act"));
   console.log(`\nreal React errors: ${real.length}`);

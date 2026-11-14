@@ -96,8 +96,25 @@ function Measurements({ status }: Readonly<{ status: LiveStatus }>) {
 export function LivePanel({ targetDir, status, onChanged }: Props) {
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [restartNeeded, setRestartNeeded] = useState(false);
 
   if (!status) return null;
+
+  // Missing capability metadata is not permission to write an ABI-specific
+  // plugin. The beta disables every live path until the runtime is verified.
+  if (status.supported !== true) {
+    return (
+      <PanelSection title="Live in-game control">
+        <PanelSectionRow>
+          <Notice tone="info" title="Live control is unavailable">
+            {status.reason ?? "This runtime has no verified live-control support."}
+            {" Settings are saved for the next launch."}
+          </Notice>
+        </PanelSectionRow>
+      </PanelSection>
+    );
+  }
 
   // Each of these is a different failure with a different fix, and the whole
   // point of reporting them separately is that "not connected" on its own tells
@@ -147,6 +164,19 @@ export function LivePanel({ targetDir, status, onChanged }: Props) {
 
   return (
     <PanelSection title="Live in-game control">
+      {error ? (
+        <PanelSectionRow>
+          <Notice tone="error" title="Live control action failed">{error}</Notice>
+        </PanelSectionRow>
+      ) : null}
+      {restartNeeded ? (
+        <PanelSectionRow>
+          <Notice tone="info" title="Restart the game to load the change">
+            Live control was installed successfully. Close and relaunch the game before checking
+            its status.
+          </Notice>
+        </PanelSectionRow>
+      ) : null}
       <PanelSectionRow>{body}</PanelSectionRow>
 
       <Measurements status={status} />
@@ -190,9 +220,18 @@ export function LivePanel({ targetDir, status, onChanged }: Props) {
             disabled={busy}
             onClick={async () => {
               setBusy(true);
+              setError(null);
+              setRestartNeeded(false);
               try {
-                await installLive(targetDir);
+                const result = await installLive(targetDir);
+                if (!result.ok) {
+                  setError(result.error ?? "Could not install live control.");
+                  return;
+                }
+                setRestartNeeded(true);
                 await onChanged();
+              } catch (exc) {
+                setError(String(exc));
               } finally {
                 setBusy(false);
               }
@@ -210,8 +249,11 @@ export function LivePanel({ targetDir, status, onChanged }: Props) {
             disabled={busy}
             onClick={async () => {
               setBusy(true);
+              setError(null);
               try {
                 setLog((await getLiveLog(targetDir, 30)).lines);
+              } catch (exc) {
+                setError(String(exc));
               } finally {
                 setBusy(false);
               }

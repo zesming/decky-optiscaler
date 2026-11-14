@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.8-pbz.1 (experimental)
+
+- Pin the official 0.9.5-pre5 core and community FSR4.1.1b archive; surface PBZ's version, executable folder and 100% output-scale requirements.
+- Add an explicit Steam Deck / LSFG experiment, pre-experiment restore points, and full removal of new experiment resources.
+- Preserve original INI/files, user launch wrappers and component ownership; recover failed file transactions.
+- Correct automatic-setting refresh, failed optimistic writes and cross-game async state; strengthen behavior assertions.
+- Disable the incompatible 0.9.4 live ASI. Settings require restarting the game. Physical Steam Deck/PBZ validation remains pending.
+
+
 Newest first. Each release ships `Decky OptiScaler.zip` for Decky Loader's
 *Install from URL* (Developer mode), and bundles **OptiScaler 0.9.4**.
 

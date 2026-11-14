@@ -52,6 +52,7 @@ export interface ExeCandidate {
   relative: string;
   score: number;
   executables: string[];
+  writable?: boolean;
 }
 
 export interface GpuInfo {
@@ -125,6 +126,14 @@ export interface InstallInfo {
   backup_dir: string;
   backed_up: string[];
   launch_record: LaunchRecord;
+  /** True only when the installed OptiScaler proxy matches this plugin's pinned runtime hash. */
+  runtime_current?: boolean;
+  /** A preserved pre-upgrade snapshot that can still be restored. */
+  rollback?: {
+    available: boolean;
+    version?: string;
+    metadata?: Record<string, unknown>;
+  };
   fsr4: Fsr4Status;
   /**
    * Whether REFramework's dll is next to the executable, and whether this
@@ -150,6 +159,8 @@ export interface GameDetail {
   gpu: GpuInfo;
   target: string;
   target_is_saved: boolean;
+  /** Backend-confirmed canonical PBZ.exe folder, null if missing. */
+  pbz_target?: string | null;
   candidates: ExeCandidate[];
   install: InstallInfo;
   launch_option: string;
@@ -344,6 +355,12 @@ export interface AutoPlan {
   /** Things the wiki named that could not be turned into a setting. */
   unresolved: { text: string; source: string }[];
   warnings: string[];
+  /** Whether the bundled runtime can satisfy this game's stated minimum. */
+  runtime_supported?: boolean;
+  required_version?: string | null;
+  required_target?: string | null;
+  manual_steps?: string[];
+  blocked_reason?: string | null;
 }
 
 export interface AutoPlanResult {
@@ -360,6 +377,8 @@ export interface ConfigResult {
   path?: string;
   values: ConfigValues;
   modified?: number;
+  /** Writes are allowed only when true; false or missing capability metadata is read-only. */
+  runtime_current?: boolean;
 }
 
 /** Result of writing config keys, including what the running game adopted. */
@@ -417,6 +436,9 @@ export interface OptipatcherStatus {
 
 /** What the in-game live-control plugin reports about itself. */
 export interface LiveStatus {
+  /** Explicit false means this runtime is not allowed to use the legacy live ABI. */
+  supported?: boolean;
+  reason?: string | null;
   asi_installed: boolean;
   asi_available: boolean;
   /**

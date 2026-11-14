@@ -1,3 +1,4 @@
+import { isPbzTitle, pbzTargetMismatch } from "../gameTarget";
 import {
   ButtonItem,
   DialogButton,
@@ -8,16 +9,23 @@ import {
   Tabs,
 } from "@decky/ui";
 import { toaster } from "@decky/api";
-import { useCallback, useEffect, useState } from "react";
-import { applyAutoSettings, getGame } from "../api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { applyAutoSettings, getGame, rollbackInstall, setAutoMode, setupDeckExperiment } from "../api";
+import { invalidateTargetReads, serializeTargetWrite } from "../config/writeRecord";
 import { TABS } from "../config/tabs";
 import { useAutoPlan } from "../hooks/useAutoPlan";
 import { useConfig } from "../hooks/useConfig";
-import { restartGame } from "../hooks/useRunningGame";
+import { restartGame, setLaunchOptions } from "../hooks/useRunningGame";
 import { useLiveStatus } from "../hooks/useLiveStatus";
-import type { GameDetail as GameDetailData, PayloadStatus, RunningGame } from "../types";
+import { preserveExistingInstall } from "../launchOptions";
+import type {
+  GameDetail as GameDetailData,
+  LiveApplyResult,
+  PayloadStatus,
+  RunningGame,
+} from "../types";
 import { BasicPanel } from "./BasicPanel";
-import { Centered, Pill } from "./Common";
+import { Centered, Notice, Pill } from "./Common";
 import { ConfigTab } from "./ConfigTab";
 import { DetailHeader, ModeSwitch } from "./DetailHeader";
 import { InstallPanel } from "./InstallPanel";
@@ -132,26 +140,49 @@ export function GameDetail({
   // The Setup tab is a checklist; the two things it links to open in its place
   // rather than as tabs of their own, because neither is a place to live.
   const [setupView, setSetupView] = useState<"checklist" | "manual" | "logs">("checklist");
+  const [autoBusy, setAutoBusy] = useState(false);
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const [restoreSteam, setRestoreSteam] = useState<{ appid: string; value: string } | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [experimentBusy, setExperimentBusy] = useState(false);
+  const selectionKey = `${gamePath}\u0000${gameName}\u0000${appid ?? ""}`;
+  const selectionKeyRef = useRef(selectionKey);
+  selectionKeyRef.current = selectionKey;
+  const loadSequence = useRef(0);
 
   const load = useCallback(async () => {
+    const requestedKey = `${gamePath}\u0000${gameName}\u0000${appid ?? ""}`;
+    const sequence = ++loadSequence.current;
     setLoading(true);
     try {
-      setDetail(await getGame(gamePath, gameName));
+      const result = await getGame(gamePath, gameName);
+      if (selectionKeyRef.current !== requestedKey || loadSequence.current !== sequence) return null;
+      setDetail(result);
+      return result;
     } catch (exc) {
-      toaster.toast({ title: "Could not read game", body: String(exc) });
+      if (selectionKeyRef.current === requestedKey && loadSequence.current === sequence) {
+        toaster.toast({ title: "Could not read game", body: String(exc) });
+      }
+      return null;
     } finally {
-      setLoading(false);
+      if (selectionKeyRef.current === requestedKey && loadSequence.current === sequence) {
+        setLoading(false);
+      }
     }
-  }, [gamePath, gameName]);
+  }, [gamePath, gameName, appid]);
 
   useEffect(() => {
+    setRestoreSteam(null);
+    setRestoreError(null);
     void load();
   }, [load]);
 
   // A different game starts at the top of its own checklist.
   useEffect(() => {
     setSetupView("checklist");
-  }, [gamePath]);
+    setRestoreSteam(null);
+    setRestoreError(null);
+  }, [gamePath, appid]);
 
   const installed = Boolean(detail?.install.installed);
   const targetDir = detail?.install.installed ? detail.install.path : null;
@@ -159,17 +190,24 @@ export function GameDetail({
     runningGame !== null && appid !== null && String(runningGame.appid) === appid;
   // OptiScaler's overlay writes the ini when the user hits Save in-game, so
   // re-read it whenever this game stops running rather than trusting our copy.
-  const config = useConfig(targetDir, installed, isRunning);
-  const { status: liveStatus } = useLiveStatus(targetDir, isRunning);
+  const config = useConfig(targetDir, installed, isRunning, selectionKey, { gamePath, appid });
+  const beforeConfigMutation = async () => {
+    await config.flush();
+    if (targetDir) invalidateTargetReads(targetDir);
+  };
+  const { status: liveStatus, refresh: refreshLive } = useLiveStatus(targetDir, isRunning);
+  const runtimeCurrent =
+    detail?.install.runtime_current === true && config.runtimeCurrent === true;
   const {
     plan,
     recommendation,
     loading: loadingWiki,
     refreshing: refreshingWiki,
     auto,
-    setAuto,
     reload: reloadPlan,
   } = useAutoPlan(gamePath, gameName);
+  const requiredTargetMismatch = detail && pbzTargetMismatch(detail,
+    Boolean(plan?.required_target) || isPbzTitle(gameName), targetDir ?? detail.target);
 
   /**
    * Switching automatic on re-applies the wiki's settings; switching it off
@@ -182,15 +220,137 @@ export function GameDetail({
    * editable, not that the game goes back to stock.
    */
   const changeAuto = async (enabled: boolean) => {
-    await setAuto(enabled);
-    if (!enabled || !targetDir) return;
-    const folder = gamePath.split("/").filter(Boolean).pop() ?? gameName;
-    const result = await applyAutoSettings(targetDir, gamePath, gameName, [folder]);
-    if (result.ok) {
-      await config.reload();
-      toaster.toast({ title: "Automatic settings applied", body: detailName(plan, gameName) });
+    if (autoBusy) return;
+    setAutoBusy(true);
+    try {
+      if (enabled) {
+        if (!targetDir || !installed) throw new Error("Set up OptiScaler before enabling Automatic.");
+        if (!runtimeCurrent) {
+          throw new Error("Upgrade runtime in Setup before applying automatic settings.");
+        }
+        if (detail && pbzTargetMismatch(detail, Boolean(plan?.required_target) || isPbzTitle(gameName), targetDir)) {
+          throw new Error("Choose the main PBZ.exe folder at PBZ/platform/steam in Setup first.");
+        }
+        await config.flush();
+        invalidateTargetReads(targetDir);
+        const folder = gamePath.split("/").filter(Boolean).pop() ?? gameName;
+        const result = await serializeTargetWrite(targetDir, () =>
+          applyAutoSettings(targetDir, gamePath, gameName, [folder]),
+        );
+        invalidateTargetReads(targetDir);
+        if (!result.ok) throw new Error(result.error ?? "Could not apply the wiki settings.");
+        await config.authoritativeReload();
+        const live = (result as { live?: LiveApplyResult }).live;
+        if (live?.sent && (live.deferred?.length ?? 0) === 0) config.clearDirty();
+        else config.markDirty();
+        await reloadPlan(false);
+        toaster.toast({ title: "Automatic settings applied", body: detailName(plan, gameName) });
+      } else {
+        const result = await setAutoMode(gamePath, false);
+        if (!result.ok) throw new Error(result.error ?? "Could not turn Automatic off.");
+        await reloadPlan(false);
+      }
+    } catch (exc) {
+      try {
+        await config.authoritativeReload();
+      } catch {
+        // The write error is already reported below; a failed refresh must not hide it.
+      }
+      await reloadPlan(false);
+      toaster.toast({
+        title: enabled ? "Could not apply the wiki settings" : "Could not update Automatic",
+        body: String(exc),
+      });
+    } finally {
+      setAutoBusy(false);
+    }
+  };
+
+  const restorePreviousInstall = async () => {
+    if (
+      !detail?.install.rollback?.available || !detail.install.path ||
+      restoreBusy || isRunning
+    ) return;
+    setRestoreBusy(true);
+    setRestoreError(null);
+    try {
+      await config.flush();
+      invalidateTargetReads(detail.install.path);
+      const result = await rollbackInstall(detail.install.path, gamePath);
+      if (!result.ok) throw new Error(result.error ?? "Could not restore the previous install.");
+      let steamRestored = !appid;
+      if (appid) {
+        if (typeof result.launch_options !== "string") {
+          setRestoreError(
+            "Files were restored, but this restore point did not contain Steam launch options. " +
+              "The current value was left unchanged; check Steam and restore it manually.",
+          );
+          setRestoreSteam(null);
+        } else {
+          const value = result.launch_options;
+          steamRestored = setLaunchOptions(Number(appid), value);
+          setRestoreSteam(steamRestored ? null : { appid, value });
+          if (!steamRestored) {
+            setRestoreError("Files were restored, but Steam rejected the launch options. Retry below.");
+          }
+        }
+      }
+      await load();
+      await config.authoritativeReload();
+      await refreshLive();
+      await reloadPlan(false);
+      if (steamRestored) {
+        toaster.toast({ title: "Previous install restored", body: "The saved files and launch options were restored." });
+      }
+    } catch (exc) {
+      toaster.toast({ title: "Restore failed", body: String(exc) });
+    } finally {
+      setRestoreBusy(false);
+    }
+  };
+
+  const retryRestoreLaunchOptions = () => {
+    const saved = detail?.install.rollback?.metadata?.launch_options;
+    const value = restoreSteam?.value ?? (typeof saved === "string" ? saved : null);
+    const targetAppid = restoreSteam?.appid ?? appid;
+    if (!targetAppid || value === null) return;
+    const restored = setLaunchOptions(Number(targetAppid), value);
+    if (restored) {
+      setRestoreSteam(null);
+      setRestoreError(null);
+      toaster.toast({ title: "Steam launch options restored", body: value || gameName });
     } else {
-      toaster.toast({ title: "Could not apply the wiki settings", body: String(result.error) });
+      setRestoreError("Steam still rejected the launch options. Retry again or restore them in Steam.");
+    }
+  };
+
+  const runDeckExperiment = async () => {
+    if (
+      !detail?.install.installed || !targetDir || experimentBusy || !runtimeCurrent ||
+      isRunning
+    ) return;
+    setExperimentBusy(true);
+    try {
+      await config.flush();
+      invalidateTargetReads(targetDir);
+      const snapshot = await preserveExistingInstall(targetDir, gamePath, appid);
+      if (!snapshot.ok) throw new Error(snapshot.error ?? "Could not preserve the current install.");
+      const result = await serializeTargetWrite(targetDir, () =>
+        setupDeckExperiment(targetDir, gamePath),
+      );
+      invalidateTargetReads(targetDir);
+      if (!result.ok) throw new Error(result.error ?? "Could not set up the PBZ experiment.");
+      await config.authoritativeReload();
+      config.markDirty();
+      await load();
+      toaster.toast({
+        title: "PBZ FSR 4.1 experiment is ready",
+        body: "Restart the game. In its graphics settings, set Super Resolution Output Scale to 100% and turn frame generation off.",
+      });
+    } catch (exc) {
+      toaster.toast({ title: "PBZ experiment failed", body: String(exc) });
+    } finally {
+      setExperimentBusy(false);
     }
   };
 
@@ -224,7 +384,7 @@ export function GameDetail({
   // Changes the running game already took need no restart, so say so instead of
   // nagging: this is the whole point of the in-game live-control plugin.
   const liveBanner =
-    installed && !config.dirty && config.live?.sent ? (
+    installed && liveStatus?.supported === true && !config.dirty && config.live?.sent ? (
       <div
         style={{
           display: "flex",
@@ -266,30 +426,29 @@ export function GameDetail({
           Saved. OptiScaler reads its config at launch, so restart the game to apply.
         </span>
         {isThisGameRunning && runningGame ? (
-          <button
-            onClick={() => {
-              if (restartGame(runningGame)) {
-                config.clearDirty();
-                toaster.toast({ title: "Restarting", body: detail.name });
-              } else {
-                toaster.toast({ title: "Could not restart", body: "Relaunch manually." });
-              }
-            }}
-            style={{
-              background: "#e8a33d",
-              border: "none",
-              borderRadius: "3px",
-              color: "#241a08",
-              cursor: "pointer",
-              font: "inherit",
-              fontSize: "11px",
-              fontWeight: 600,
-              padding: "3px 9px",
-              whiteSpace: "nowrap",
-            }}
-          >
-            Restart now
-          </button>
+          <Focusable style={{ display: "flex" }}>
+            <DialogButton
+              onClick={() => {
+                if (restartGame(runningGame)) {
+                  config.clearDirty();
+                  toaster.toast({ title: "Restarting", body: detail.name });
+                } else {
+                  toaster.toast({ title: "Could not restart", body: "Relaunch manually." });
+                }
+              }}
+              onOKActionDescription="Restart this game now"
+              style={{
+                background: "#e8a33d",
+                color: "#241a08",
+                fontSize: "11px",
+                fontWeight: 600,
+                padding: "3px 9px",
+                whiteSpace: "nowrap",
+              }}
+            >
+              Restart now
+            </DialogButton>
+          </Focusable>
         ) : null}
       </div>
     ) : null;
@@ -312,20 +471,26 @@ export function GameDetail({
               live={liveStatus}
               running={isThisGameRunning}
               onSetAuto={(enabled) => changeAuto(enabled)}
+              autoBusy={autoBusy}
               onManual={() => setSetupView("manual")}
               onLogs={() => setSetupView("logs")}
               onChanged={async () => {
                 await load();
-                config.forgetLocal();
-                await config.reload();
+                await config.authoritativeReload();
+                await refreshLive();
+                await reloadPlan(false);
               }}
               onReloadPlan={() => reloadPlan(false)}
+              onRestore={restorePreviousInstall}
+              restoreBusy={restoreBusy}
+              restoreError={restoreError}
+              onRetryRestoreLaunchOptions={retryRestoreLaunchOptions}
+              onDeckExperiment={runDeckExperiment}
+              experimentBusy={experimentBusy}
               onResetConfig={async () => {
-                // Reset copies the stock ini in; the record of what we last
-                // wrote belongs to the file that just went away.
-                config.forgetLocal();
-                await config.reload();
+                await config.authoritativeReload();
               }}
+              onBeforeMutation={beforeConfigMutation}
             />
           ) : (
             <>
@@ -339,14 +504,17 @@ export function GameDetail({
                   status={status}
                   appid={appid}
                   live={liveStatus}
+                  onBeforeMutation={beforeConfigMutation}
                   onChanged={async () => {
                     await load();
-                    config.forgetLocal();
-                    await config.reload();
+                    await config.authoritativeReload();
+                    await refreshLive();
+                    await reloadPlan(false);
                   }}
                 />
               ) : (
                 <MonitorTab
+                  key={targetDir ?? detail.target}
                   targetDir={targetDir ?? detail.target}
                   live={isThisGameRunning}
                   onNeedsRestart={() => undefined}
@@ -377,13 +545,17 @@ export function GameDetail({
                     launch. */}
                 <BasicPanel
                   values={config.values}
-                  disabled={config.loading}
+                  disabled={
+                    config.loading || config.saving ||
+                    !runtimeCurrent || Boolean(requiredTargetMismatch)
+                  }
                   gpu={detail.gpu}
                   live={liveStatus}
                   ffx={detail.install.fsr4?.ffx}
                   plan={plan}
                   auto={auto}
                   onAutoChange={(enabled) => void changeAuto(enabled)}
+                  autoBusy={autoBusy}
                   fsr4Build={config.fsr4Build}
                   onEnableFsr4={config.enableFsr4}
                   onApply={config.setOptions}
@@ -420,7 +592,8 @@ export function GameDetail({
                 sections={tab.sections}
                 blurb={tab.blurb}
                 values={config.values}
-                disabled={config.loading || config.saving}
+                disabled={config.loading || config.saving ||
+                  !runtimeCurrent}
                 onChange={config.setOption}
                 onResetSection={config.resetSection}
               />
@@ -462,8 +635,60 @@ export function GameDetail({
         }
       />
 
+      {requiredTargetMismatch ? (
+        <Notice tone="warn" title="Choose the main PBZ.exe folder">
+          PBZ requires PBZ/platform/steam. In Setup, remove any installation in another folder before selecting the main executable location.
+        </Notice>
+      ) : null}
       {liveBanner}
       {restartBanner}
+
+      {installed && !runtimeCurrent ? (
+        <div
+          style={{
+            margin: "0 12px 4px",
+            padding: "6px 9px",
+            borderLeft: "3px solid #e8a33d",
+            background: "rgba(232,163,61,0.12)",
+            borderRadius: "3px",
+            fontSize: "12px",
+            flexShrink: 0,
+          }}
+        >
+          This install uses an older OptiScaler runtime. Settings are read-only until you upgrade
+          it in Setup.
+        </div>
+      ) : null}
+
+      {restoreError ? (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+            margin: "0 12px 4px",
+            padding: "6px 9px",
+            borderLeft: "3px solid #e05c5c",
+            background: "rgba(224,92,92,0.12)",
+            borderRadius: "3px",
+            fontSize: "12px",
+            flexShrink: 0,
+          }}
+        >
+          <span style={{ flexGrow: 1 }}>{restoreError}</span>
+          {restoreSteam ? (
+            <Focusable style={{ display: "flex" }}>
+              <DialogButton
+                disabled={restoreBusy}
+                onClick={retryRestoreLaunchOptions}
+                onOKActionDescription="Retry restoring Steam launch options"
+              >
+                Retry
+              </DialogButton>
+            </Focusable>
+          ) : null}
+        </div>
+      ) : null}
 
       {config.error && installed ? (
         <div

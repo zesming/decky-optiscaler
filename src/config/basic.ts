@@ -58,7 +58,10 @@ function upscalerPreset(
   // clearing a setting on the way past — the one thing that makes FSR 4
   // reachable on a Deck that does not have it natively.
   if (int8 !== undefined) {
-    changes.push(change("FSR", "Fsr4ForceEnableInt8", int8 ? "true" : "false"));
+    // The pinned runtime reads an integer mode: 0 disables forcing, while 1
+    // forces the general INT8 model. Model 2 is RDNA2-specific and is only
+    // written by an explicit profile after its compatibility is verified.
+    changes.push(change("FSR", "Fsr4ForceEnableInt8", int8 ? "1" : "0"));
   }
   return {
     id,
@@ -70,7 +73,7 @@ function upscalerPreset(
       if (fsr4Update === undefined) return true;
       // A preset that writes the override off is not the one in force while it
       // is on: the INT8 route cannot be described by any other preset's flag.
-      if (int8 === false && get(values, "FSR", "Fsr4ForceEnableInt8") === "true") {
+      if (int8 === false && get(values, "FSR", "Fsr4ForceEnableInt8") !== "0") {
         return false;
       }
       const flag = get(values, "FSR", "Fsr4Update");
@@ -110,13 +113,13 @@ export const UPSCALER_PRESETS: Preset[] = [
       // answers with its internal FSR 3 fallback. The INT8 override is the
       // route that keeps FSR 4 on an RDNA 2 part, and it is what this preset is.
       change("FSR", "Fsr4Update", AUTO),
-      change("FSR", "Fsr4ForceEnableInt8", "true"),
+      change("FSR", "Fsr4ForceEnableInt8", "1"),
       change("FSR", "UpscalerIndex", "0"),
       change("FSR", "Fsr4Preset", AUTO),
     ],
     matches: (values) =>
       get(values, "Upscalers", "Dx12Upscaler") === "fsr31" &&
-      get(values, "FSR", "Fsr4ForceEnableInt8") === "true" &&
+      get(values, "FSR", "Fsr4ForceEnableInt8") === "1" &&
       get(values, "FSR", "Fsr4Update") !== "true" &&
       get(values, "FSR", "UpscalerIndex") === "0",
   },

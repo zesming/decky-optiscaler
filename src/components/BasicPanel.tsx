@@ -66,6 +66,7 @@ interface Props {
   plan?: AutoPlan | null;
   /** Whether the wiki is currently driving everything but the three choices. */
   auto?: boolean;
+  autoBusy?: boolean;
   onAutoChange?: (enabled: boolean) => void;
   onLiveChanged?: () => void;
   fsr4Build?: string | null;
@@ -209,24 +210,26 @@ export function BasicPanel({
   values,
   disabled,
   gpu,
-  live,
+  live: reportedLive,
   ffx,
   targetDir,
   compact,
   plan,
   auto,
+  autoBusy,
   onAutoChange,
   onLiveChanged,
   onApply,
   fsr4Build,
   onEnableFsr4,
 }: Readonly<Props>) {
+  const live = reportedLive?.supported === true ? reportedLive : null;
   // Which upscaler the user just picked, if it is not the one the game is
   // running. Cleared once the game has taken it, so the switch is offered only
   // when there is something to switch to.
   const [installingFsr4, setInstallingFsr4] = useState(false);
   const [fsr4Error, setFsr4Error] = useState<string | null>(null);
-  const busy = disabled || installingFsr4;
+  const busy = disabled || installingFsr4 || autoBusy;
   const [picked, setPicked] = useState<string | null>(null);
   const [methodChanged, setMethodChanged] = useState(false);
   const [ffxFgChanged, setFfxFgChanged] = useState(false);
@@ -344,6 +347,7 @@ export function BasicPanel({
     Boolean(wanted) &&
     wanted !== liveBackend &&
     Boolean(live?.attached) &&
+    live?.supported !== false &&
     Boolean(live?.can_switch_upscaler) &&
     !int8RestartOnly;
   // Attached, a different upscaler picked, and still no switch on offer. The
@@ -455,10 +459,12 @@ export function BasicPanel({
               label="Automatic"
               description={hint(
                 automatic
-                  ? `Set from “${planned.game}” on the OptiScaler wiki. You choose frame ` +
+                  ? `Applied from “${planned.game}” when you set up, enable, or re-apply it. ` +
+                    "Wiki changes are not written continuously. You choose frame " +
                     "generation and how it runs, the multiplier and the upscaler; " +
                     "everything else follows the entry."
-                  : "Let this game's wiki entry set everything except frame generation " +
+                  : "Apply this game's wiki settings during setup, when enabling Automatic, " +
+                    "or when you re-apply it. Frame generation " +
                     "and how it runs, the multiplier and the upscaler."
               )}
               checked={automatic}
@@ -501,6 +507,17 @@ export function BasicPanel({
               </div>
             </PanelSectionRow>
           ) : null}
+        </PanelSection>
+      ) : null}
+
+      {reportedLive?.supported === false ? (
+        <PanelSection>
+          <PanelSectionRow>
+            <Notice tone="info" title="Live control is unavailable">
+              {reportedLive?.reason ?? "This runtime version is not supported by the live-control plugin."}
+              {compact ? " Settings are saved for the next launch." : " No in-game changes are being reported."}
+            </Notice>
+          </PanelSectionRow>
         </PanelSection>
       ) : null}
 

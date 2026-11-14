@@ -3,9 +3,11 @@ import { createRoot } from "react-dom/client";
 // React 18.3 exports act itself; the react-dom/test-utils re-export logs a
 // deprecation warning on every run, which the pass condition below counts.
 import { act } from "react";
-import { fixtures, calls } from "@decky/api";
+import { fixtures, calls, invocations, toaster } from "@decky/api";
 import { GENERATED_OPTIONS } from "../src/config/generatedSchema";
+import { beginTargetFlush, finishTargetFlush, forgetWrites, getTargetConfigQueue } from "../src/config/writeRecord";
 import { ManagerPage } from "../src/components/ManagerPage";
+import { NowPlaying } from "../src/components/NowPlaying";
 import { QuickPanel } from "../src/components/QuickPanel";
 
 // ---- fixtures mirroring what the Python backend returns --------------------
@@ -29,6 +31,8 @@ const detail = {
   install: {
     path: "/games/Cyberpunk 2077/bin/x64",
     installed: true, filename: "dxgi.dll", managed: true, version: "0.9.4",
+    runtime_current: true,
+    rollback: { available: false },
     installed_at: 1700000000, ini_present: true, ini_path: "/x/OptiScaler.ini",
     log_present: true, log_path: "/x/OptiScaler.log",
     candidates: ["dxgi.dll"], extra_proxies: [],
@@ -112,6 +116,7 @@ Object.assign(fixtures, {
     },
     plan: {
       available: true, enabled: false, game: "Cyberpunk 2077", source: "wiki entry",
+      runtime_supported: true,
       wiki_url: "https://x", filename: "dxgi.dll", filename_source: "wiki entry",
       optipatcher: true,
       launch_flags: ["-dx12"],
@@ -138,9 +143,36 @@ Object.assign(fixtures, {
   remove_reframework: { ok: true, removed: ["dinput8.dll"], restored: ["dinput8.dll"] },
   set_auto_mode: { ok: true, enabled: true },
   auto_install: { ok: true, applied: [], rejected: [] },
-  apply_auto_settings: { ok: true, applied: [] },
-  read_config: { ok: true, path: "/x/OptiScaler.ini", values: iniValues, modified: 1 },
-  write_config: { ok: true, applied: [], rejected: [] },
+  apply_auto_settings: () => {
+    const current = fixtures.get_auto_plan?.plan;
+    const applied = [] as any[];
+    for (const item of current?.settings ?? []) {
+      iniValues[item.section] = { ...(iniValues[item.section] ?? {}), [item.key]: item.value };
+      applied.push(item);
+    }
+    if (current?.framegen && current.framegen.input !== "nofg") {
+      iniValues.FrameGen = {
+        ...(iniValues.FrameGen ?? {}),
+        Enabled: "true",
+        FGInput: current.framegen.input,
+        FGOutput: current.framegen.output,
+      };
+      applied.push(
+        { section: "FrameGen", key: "FGInput", value: current.framegen.input },
+        { section: "FrameGen", key: "FGOutput", value: current.framegen.output },
+      );
+    }
+    if (current) current.enabled = true;
+    return { ok: true, applied, rejected: [], live: { sent: false, deferred: applied } };
+  },
+  read_config: {
+    ok: true, path: "/x/OptiScaler.ini", values: iniValues, modified: 1,
+    runtime_current: true,
+  },
+  write_config: (_dir: string, changes: any[]) => {
+    for (const item of changes) iniValues[item.section] = { ...(iniValues[item.section] ?? {}), [item.key]: item.value };
+    return { ok: true, applied: changes, rejected: [], live: { sent: true, deferred: [] } };
+  },
   reset_config: { ok: true },
   get_monitor: {
     path: "/x", log_path: "/x/OptiScaler.log", log_present: true, log_size: 2048,
@@ -155,6 +187,7 @@ Object.assign(fixtures, {
   },
   clear_log: { ok: true },
   get_live_status: {
+    supported: true,
     asi_installed: true, asi_available: true, attached: true, ready: true, state: "ready",
     load_enabled: true, loaded_by_optiscaler: true,
     error: null, seq: "1", can_switch_upscaler: true, age: 1.0,
@@ -217,10 +250,28 @@ Object.assign(fixtures, {
   remove_custom_library: { ok: true },
   set_game_target: { ok: true },
   install: { ok: true },
+  create_restore_point: { ok: true, available: true },
+  rollback_install: { ok: true, launch_options: "gamemoderun %command%" },
+  setup_deck_experiment: { ok: true, restart_needed: true },
 });
+
+fixtures.set_auto_mode = (_gamePath: string, enabled: boolean) => {
+  if (fixtures.get_auto_plan?.plan) fixtures.get_auto_plan.plan.enabled = enabled;
+  return { ok: true, enabled };
+};
 
 // ---- harness ---------------------------------------------------------------
 const errors: string[] = [];
+const behaviorFailures: string[] = [];
+const originalLog = console.log.bind(console);
+// Existing behavior checks print their boolean result. Make those checks part
+// of the process exit contract so a false result cannot leave CI green.
+console.log = (...args: any[]) => {
+  const line = args.map(String).join(" ");
+  const check = line.match(/^\s*(.*?)\s*:\s*(true|false)$/);
+  if (check?.[2] === "false") behaviorFailures.push(check[1].trim());
+  originalLog(...args);
+};
 const originalError = console.error;
 console.error = (...args: any[]) => {
   errors.push(args.map(String).join(" "));
@@ -555,6 +606,61 @@ async function render(name: string, element: React.ReactElement) {
   console.log(`  sliders: ${findAll(gd.host, '[data-mock="SliderField"]').length}`);
   console.log(`  wiki recommendation shown: ${gd.host.textContent!.includes("wiki entry")}`);
 
+  // Now Playing uses the same controls while a game is running, so its host
+  // must show write failures, restart guidance and the FFX version from the
+  // installed file just like the Settings page does.
+  console.log("\n=== full-screen Now Playing feedback ===");
+  {
+    iniValues.Upscalers.Dx12Upscaler = "fsr31";
+    forgetWrites(detail.install.path);
+    const previousWrite = fixtures.write_config;
+    fixtures.write_config = () => ({ ok: false, error: "Now Playing write failed" });
+    const failedNow = await render(
+      "NowPlaying (write failure)",
+      <NowPlaying runningGame={{ appid: 1091500, name: "Cyberpunk 2077", gameid: "1091500" }}
+        onOpenGame={() => {}} onBrowse={() => {}} />,
+    );
+    const fsrVersion = findAll(failedNow.host,
+      '[data-mock="DropdownItem"][data-label="FSR version"]')[0];
+    console.log(`  FSR version comes from the detected FidelityFX file: ${
+      fsrVersion?.getAttribute("data-shown") === "FSR 4.1.1"}`);
+    await act(async () => {
+      (findAll(failedNow.host,
+        '[data-mock="DropdownItem"][data-label="Override upscaler with"] [data-opt-value="xess"]')[0] as HTMLElement).click();
+    });
+    await settle(100);
+    console.log(`  a write failure is visible on Now Playing: ${
+      failedNow.host.textContent!.includes("Now Playing write failed")}`);
+    console.log(`  and the optimistic choice returns to the INI value: ${
+      findAll(failedNow.host,
+        '[data-mock="DropdownItem"][data-label="Override upscaler with"]')[0]
+        ?.getAttribute("data-selected") === "fsr31"}`);
+    await act(async () => failedNow.root.unmount());
+
+    fixtures.write_config = (_dir: string, changes: any[]) => ({
+      ok: true, applied: changes, rejected: [],
+      live: { sent: false, deferred: changes },
+    });
+    const savedNow = await render(
+      "NowPlaying (restart required)",
+      <NowPlaying runningGame={{ appid: 1091500, name: "Cyberpunk 2077", gameid: "1091500" }}
+        onOpenGame={() => {}} onBrowse={() => {}} />,
+    );
+    await act(async () => {
+      (findAll(savedNow.host,
+        '[data-mock="DropdownItem"][data-label="Override upscaler with"] [data-opt-value="xess"]')[0] as HTMLElement).click();
+    });
+    await settle(100);
+    console.log(`  saved changes show a restart action: ${
+      savedNow.host.textContent!.includes("Restart the game to apply") &&
+      savedNow.host.textContent!.includes("Restart game to apply")}`);
+    await act(async () => savedNow.root.unmount());
+    fixtures.write_config = previousWrite;
+    const queue = getTargetConfigQueue(detail.install.path);
+    const acknowledgement = beginTargetFlush(queue, queue.revision, true);
+    finishTargetFlush(queue, acknowledgement);
+  }
+
   // -- setting a game up, as a checklist ------------------------------------
   // The Setup tab is the same three steps before and after: what will happen,
   // then what did. Everything else it used to hold is one row away.
@@ -566,9 +672,9 @@ async function render(name: string, element: React.ReactElement) {
   console.log(`  setup states what is installed: ${
     setupText.includes("Installed as") && setupText.includes("dxgi.dll")}`);
   console.log(`  the wiki step is a toggle, off until asked for: ${
-    findAll(gd.host, '[data-mock="ToggleField"][data-label^="Not following the wiki"]').length === 1}`);
+    findAll(gd.host, '[data-mock="ToggleField"][data-label^="Not using the wiki"]').length === 1}`);
   console.log(`  and says what turning it on would do: ${
-    setupText.includes("let the wiki keep the ones this game needs")}`);
+    setupText.includes("apply the wiki settings once")}`);
   // Removing has to be findable without hunting: it is on the tab, not behind
   // the manual page it used to live on.
   console.log(`  removing and resetting stay on the setup tab: ${
@@ -670,6 +776,92 @@ async function render(name: string, element: React.ReactElement) {
   await settle();
   console.log(`  turning one off narrows the button: ${
     gdFresh.host.textContent!.includes("Do both")}`);
+
+  // Both Setup and the Manual panel add only the clauses this plugin needs;
+  // existing wrappers, launch flags and DLL assignments stay in place.
+  console.log("\n=== Steam options survive both install paths ===");
+  {
+    const previousGame = fixtures.get_game;
+    const previousPlan = fixtures.get_auto_plan;
+    const previousSteam = (globalThis as any).SteamClient;
+    const previousAutoInstall = fixtures.auto_install;
+    const baseLaunch =
+      'WINEDLLOVERRIDES="d3d12=n,b" MANGOHUD=1 gamescope --mangoapp %command% -dx11';
+    const steamByAppid: Record<number, string> = { 1091500: baseLaunch, 2358720: baseLaunch };
+    const launchWrites: { appid: number; value: string }[] = [];
+    (globalThis as any).SteamClient = {
+      Apps: {
+        GetAppLaunchOptions: async (appid: number) => steamByAppid[appid] ?? baseLaunch,
+        SetAppLaunchOptions: (appid: number, value: string) => {
+          steamByAppid[appid] = value;
+          launchWrites.push({ appid, value });
+        },
+      },
+    };
+    const freshDetail = { ...detail, install: { ...detail.install, installed: false } };
+    fixtures.get_game = freshDetail;
+    fixtures.get_auto_plan = {
+      ...previousPlan,
+      recommendation: { ...previousPlan.recommendation, matched: false, game: null },
+      plan: { ...previousPlan.plan, available: false, game: null, settings: [], framegen: null },
+    };
+    const manual = await render(
+      "GameDetail (manual launch options)",
+      <GameDetail gamePath={detail.path} gameName={detail.name} appid="1091500"
+        status={fixtures.get_status} runningGame={null} onBack={() => {}} />,
+    );
+    const manualEntry = findAll(manual.host, '[data-mock="DialogButton"]')
+      .find((node) => node.textContent?.trim() === "Manual setup") as HTMLElement;
+    await act(async () => manualEntry.click());
+    await settle(80);
+    console.log(`  Manual setup cannot change Steam before a managed install: ${
+      !findAll(manual.host, '[data-mock="ButtonItem"]').some((node) => node.textContent?.includes("Set launch options for me"))}`);
+    const manualInstall = findAll(manual.host, '[data-mock="ButtonItem"]')
+      .find((node) => node.textContent?.includes("as dxgi.dll")) as HTMLElement;
+    fixtures.get_game = detail;
+    await act(async () => manualInstall.click());
+    await settle(80);
+    const setLaunch = findAll(manual.host, '[data-mock="ButtonItem"]')
+      .find((node) => node.textContent?.includes("Set launch options for me")) as HTMLElement;
+    await act(async () => setLaunch.click());
+    await settle();
+    const manualWritten = launchWrites[launchWrites.length - 1]?.value ?? "";
+    console.log(`  Manual setup keeps wrappers, flags and other DLL clauses: ${
+      manualWritten.includes("MANGOHUD=1 gamescope --mangoapp %command%") &&
+      manualWritten.includes("-dx11") && manualWritten.includes("d3d12=n,b") &&
+      manualWritten.includes("dxgi=n,b")}`);
+    await act(async () => manual.root.unmount());
+
+    fixtures.get_auto_plan = previousPlan;
+    steamByAppid[2358720] = baseLaunch;
+    fixtures.auto_install = { ok: true, applied: [], rejected: [] };
+    const invocationsBefore = invocations.length;
+    fixtures.get_game = freshDetail;
+    const guided = await render(
+      "GameDetail (guided install launch options)",
+      <GameDetail gamePath={detail.path} gameName={detail.name} appid="2358720"
+        status={fixtures.get_status} runningGame={null} onBack={() => {}} />,
+    );
+    const runSetup = findAll(guided.host, '[data-mock="DialogButton"]')
+      .find((node) => node.textContent?.includes("Do all three")) as HTMLElement;
+    await act(async () => runSetup.click());
+    await settle(80);
+    const guidedWritten = launchWrites.filter((write) => write.appid === 2358720).at(-1)?.value ?? "";
+    const installCalls = invocations.slice(invocationsBefore);
+    const recordIndex = installCalls.findIndex((call) => call.name === "record_launch_options");
+    const installIndex = installCalls.findIndex((call) => call.name === "auto_install");
+    console.log(`  guided setup captures Steam in the install transaction: ${
+      installIndex >= 0 && recordIndex < 0 && installCalls[installIndex].args[4] === baseLaunch}`);
+    console.log(`  guided setup merges rather than replaces Steam options: ${
+      guidedWritten.includes("MANGOHUD=1 gamescope --mangoapp %command%") &&
+      guidedWritten.includes("-dx11") && guidedWritten.includes("-dx12") &&
+      guidedWritten.includes("d3d12=n,b") && guidedWritten.includes("dxgi=n,b")}`);
+    await act(async () => guided.root.unmount());
+    fixtures.get_game = previousGame;
+    fixtures.get_auto_plan = previousPlan;
+    fixtures.auto_install = previousAutoInstall;
+    (globalThis as any).SteamClient = previousSteam;
+  }
   fixtures.get_game = detail;
 
   // -- a game that needs REFramework ----------------------------------------
@@ -879,11 +1071,25 @@ async function render(name: string, element: React.ReactElement) {
   console.log(`  settings offer the automatic toggle: ${Boolean(autoToggle)}`);
   console.log(`  automatic is off until asked for: ${
     !gd.host.textContent!.includes("The wiki recommends")}`);
+  // A manual edit can still be in the write queue when Automatic is enabled.
+  // The automatic apply must flush it, replace its optimistic record, and read
+  // back the wiki's authoritative FG pair instead of painting the manual one
+  // over the result.
   await act(async () => {
-    (findAll(autoToggle, "[data-toggle]")[0] as HTMLElement).click();
+    (findAll(findAll(gd.host, '[data-mock="DropdownItem"][data-label="Method"]')[0],
+      '[data-opt-value="xefg"]')[0] as HTMLElement).click();
+  });
+  await settle(100);
+  await act(async () => {
+    (findAll(findAll(gd.host, '[data-mock="ToggleField"][data-label="Automatic"]')[0],
+      "[data-toggle]")[0] as HTMLElement).click();
   });
   await settle();
   const autoText = gd.host.textContent!;
+  console.log(`  Automatic replaces a pending manual value with the wiki's pair: ${
+    findAll(gd.host, '[data-mock="DropdownItem"][data-label="Method"]')[0]
+      ?.getAttribute("data-selected") === "dlssg" &&
+      iniValues.FrameGen.FGInput === "dlssg" && iniValues.FrameGen.FGOutput === "fsrfg"}`);
   // The wiki's pair is the better starting answer, but which generator runs is
   // the user's call in either mode -- so it is printed as a recommendation
   // under the control rather than instead of it.
@@ -902,11 +1108,39 @@ async function render(name: string, element: React.ReactElement) {
     findAll(gd.host, '[data-mock="DropdownItem"][data-label="FFX FG version"]').length === 1}`);
   console.log(`  automatic says what the wiki set: ${autoText.includes("Dxgi=false")}`);
   await act(async () => {
-    (findAll(autoToggle, "[data-toggle]")[0] as HTMLElement).click();
+    (findAll(findAll(gd.host, '[data-mock="ToggleField"][data-label="Automatic"]')[0],
+      "[data-toggle]")[0] as HTMLElement).click();
   });
   await settle();
   console.log(`  turning it off gives every option back: ${
     findAll(gd.host, '[data-mock="DropdownItem"][data-label="Method"]').length === 1}`);
+
+  // The mode cannot be committed merely because the request started. Keep the
+  // switch locked while the write is pending; on failure show the reason and
+  // read the actual config and mode back.
+  let finishAuto: (result: any) => void = () => {};
+  const successfulAuto = fixtures.apply_auto_settings;
+  fixtures.apply_auto_settings = () => new Promise((resolve) => { finishAuto = resolve; });
+  const toastMessages: string[] = [];
+  const originalToast = toaster.toast;
+  toaster.toast = (message: any) => toastMessages.push(`${message.title}: ${message.body ?? ""}`);
+  await act(async () => {
+    (findAll(findAll(gd.host, '[data-mock="ToggleField"][data-label="Automatic"]')[0],
+      "[data-toggle]")[0] as HTMLElement).click();
+  });
+  await settle();
+  console.log(`  the mode switch is locked while settings apply: ${
+    findAll(gd.host, '[data-mock="ToggleField"][data-label="Automatic"]')[0]
+      ?.getAttribute("data-disabled") === "true"}`);
+  finishAuto({ ok: false, error: "Automatic config write failed" });
+  await settle(80);
+  console.log(`  a failed automatic write leaves Automatic off: ${
+    findAll(gd.host, '[data-mock="ToggleField"][data-label="Automatic"] [data-toggle]')[0]
+      ?.getAttribute("data-checked") === "false"}`);
+  console.log(`  and reports the backend reason: ${
+    toastMessages.some((message) => message.includes("Automatic config write failed"))}`);
+  toaster.toast = originalToast;
+  fixtures.apply_auto_settings = successfulAuto;
 
   // A game with no compatibility entry has nothing to be automatic about, so
   // neither the mode strip nor the toggle exists and the panel is unchanged.
@@ -936,7 +1170,7 @@ async function render(name: string, element: React.ReactElement) {
   console.log(`  live state is reported on the setup tab: ${
     liveText.includes("Live control connected")}`);
   console.log(`  live connected state shown: ${liveText.includes("Live control is connected")}`);
-  console.log(`  live path avoids restart nag: ${!liveText.includes("restart the game to apply")}`);
+  console.log(`  a live connection still reports settings deferred until restart: ${liveText.includes("restart the game to apply")}`);
 
   fixtures.get_live_status = {
     ...fixtures.get_live_status, attached: false, state: "failed",
@@ -1001,6 +1235,25 @@ async function render(name: string, element: React.ReactElement) {
     console.log(`  stripping ours keeps the user's own flags: ${
       lo.stripOverride('WINEDLLOVERRIDES="dxgi=n,b" mangohud %command% -dx12', "dxgi.dll")
         === "mangohud %command% -dx12"}`);
+    const existingOptions =
+      'WINEDLLOVERRIDES="d3d12=n,b;dinput8=b" MANGOHUD=1 gamescope --mangoapp %command% -dx11';
+    const mergedOptions = lo.mergeLaunchOptions(
+      existingOptions, "dxgi.dll", ["-dx12"], ["dinput8.dll"],
+    );
+    console.log(`  adding an override preserves the user's wrapper and flags: ${
+      mergedOptions !== null &&
+      mergedOptions.includes("MANGOHUD=1 gamescope --mangoapp %command%") &&
+      mergedOptions.includes("-dx11") && mergedOptions.includes("-dx12") &&
+      mergedOptions.includes("d3d12=n,b") && mergedOptions.includes("dxgi=n,b")}`);
+    const strippedOptions = mergedOptions === null ? null : lo.stripLaunchOptions(
+      mergedOptions, "dxgi.dll", ["-dx12"], [], existingOptions,
+    );
+    console.log(`  removing the plugin clauses preserves the existing wrapper and DLL rules: ${
+      strippedOptions !== null &&
+      strippedOptions.includes("MANGOHUD=1 gamescope --mangoapp %command%") &&
+      strippedOptions.includes("-dx11") && !strippedOptions.includes("-dx12") &&
+      strippedOptions.includes("d3d12=n,b") && strippedOptions.includes("dinput8=n,b") &&
+      !strippedOptions.includes("dxgi=n,b")}`);
     console.log(`  a bare %command% left over is an empty field: ${
       lo.stripOverride(ours, "dxgi.dll") === ""}`);
     console.log(`  another mod's override is left alone: ${
@@ -1039,12 +1292,10 @@ async function render(name: string, element: React.ReactElement) {
     // Steam will not report launch options on every client build, and leaning
     // on that one getter is what made the first version of this dialog inert:
     // it offered nothing, so removing OptiScaler left its own override behind.
-    // Clearing is still offered — last, and never as the default.
+    // Unknown values are left unchanged; removal must not guess at user options.
     const blind = lo.launchChoices({ current: null, recorded: null, filename: "dxgi.dll" });
-    console.log(`  an unreadable field can still be cleared, as a last resort: ${
-      blind.map((c) => c.action).join(",") === "keep,clear" && blind[1].value === ""}`);
-    console.log(`  and it says it is emptying the field, not pruning it: ${
-      blind[1].description.includes("would not report")}`);
+    console.log(`  an unreadable field is left unchanged: ${
+      blind.map((c) => c.action).join(",") === "keep" && blind[0].value === null}`);
     console.log(`  but a record still answers it: ${
       lo.launchChoices({ current: null, recorded: "mangohud %command%", filename: "dxgi.dll" })[0]
         .action === "restore"}`);
@@ -1064,6 +1315,30 @@ async function render(name: string, element: React.ReactElement) {
     // must not be a crash on the way to the dialog.
     console.log(`  nothing to choose between resolves to nothing: ${
       lo.resolveChoice([], "restore") === undefined}`);
+
+    // A value just accepted by Steam wins over the config-file fallback until
+    // that source catches up; otherwise a remounted Setup panel can flip back
+    // to stale launch options and hide a successful change.
+    const { currentLaunchOptions } = lo;
+    const { setLaunchOptions } = await import("../src/hooks/useRunningGame");
+    let steamSeen = "gamemoderun %command%";
+    let failSteamSetter = false;
+    (globalThis as any).SteamClient = {
+      Apps: {
+        GetAppLaunchOptions: async () => steamSeen,
+        SetAppLaunchOptions: (_appid: number, value: string) => {
+          if (failSteamSetter) throw new Error("Steam rejected launch options");
+          steamSeen = value;
+        },
+      },
+    };
+    setLaunchOptions(600000, 'gamescope --mangoapp %command%');
+    console.log(`  a recent Steam setter beats a stale read: ${
+      await currentLaunchOptions("600000") === "gamescope --mangoapp %command%"}`);
+    steamSeen = 'gamescope --mangoapp %command%';
+    console.log(`  the recent value retires once Steam agrees: ${
+      await currentLaunchOptions("600000") === "gamescope --mangoapp %command%"}`);
+    (globalThis as any).SteamClient = undefined;
 
     // -- the dialog itself ---------------------------------------------------
     const { RemovePrompt } = await import("../src/components/RemovePrompt");
@@ -1135,6 +1410,145 @@ async function render(name: string, element: React.ReactElement) {
     console.log(`  a game with none says so: ${
       findAll(nothing.host, '[data-mock="DropdownItem"]').length === 0 &&
       nothing.host.textContent!.includes("no launch options")}`);
+  }
+
+  // -- the PBZ action is opt-in and snapshots Steam before it writes --------
+  console.log("\n=== the reversible PBZ experiment ===");
+  {
+    const previousGame = fixtures.get_game;
+    const previousPlan = fixtures.get_auto_plan;
+    const previousExperiment = fixtures.setup_deck_experiment;
+    const previousSnapshot = fixtures.create_restore_point;
+    const pbzPath = "/games/Phantom Blade Zero";
+    fixtures.get_game = {
+      ...detail,
+      path: pbzPath,
+      name: "Phantom Blade Zero",
+      target: `${pbzPath}/platform/steam`,
+      pbz_target: `${pbzPath}/platform/steam`,
+      candidates: [{ path: `${pbzPath}/platform/steam`, relative: "platform/steam", score: 55, executables: ["PBZ.exe"], writable: true }],
+      install: { ...detail.install, path: `${pbzPath}/platform/steam`, runtime_current: true },
+    };
+    fixtures.get_auto_plan = {
+      ...previousPlan,
+      recommendation: { ...previousPlan.recommendation, game: "Phantom Blade Zero" },
+      plan: { ...previousPlan.plan, game: "Phantom Blade Zero", runtime_supported: true },
+    };
+    fixtures.create_restore_point = { ok: true, available: true };
+    fixtures.setup_deck_experiment = () => {
+      iniValues.FrameGen = {
+        ...(iniValues.FrameGen ?? {}), Enabled: "false", FGInput: "nofg", FGOutput: "nofg",
+      };
+      iniValues.Upscalers = {
+        ...(iniValues.Upscalers ?? {}), Dx12Upscaler: "fsr31",
+      };
+      iniValues.FSR = {
+        ...(iniValues.FSR ?? {}), Fsr4ForceEnableInt8: "1", UpscalerIndex: "0",
+      };
+      return { ok: true, restart_needed: true };
+    };
+    (globalThis as any).SteamClient = {
+      Apps: {
+        GetAppLaunchOptions: async () => "gamescope --mangoapp %command%",
+        SetAppLaunchOptions: () => {},
+      },
+    };
+    const before = invocations.length;
+    const pbz = await render(
+      "GameDetail (PBZ)",
+      <GameDetail gamePath={pbzPath} gameName="Phantom Blade Zero" appid="1091500"
+        status={fixtures.get_status} runningGame={null} onBack={() => {}} />,
+    );
+    const experimentButton = findAll(pbz.host, '[data-mock="DialogButton"]')
+      .find((node) => node.textContent?.includes("Set up the FSR 4.1 experiment")) as HTMLElement;
+    console.log(`  it offers an explicit PBZ experiment action: ${Boolean(experimentButton)}`);
+    await act(async () => experimentButton.click());
+    await settle(80);
+    const experimentCalls = invocations.slice(before);
+    const snapshotIndex = experimentCalls.findIndex((call) => call.name === "create_restore_point");
+    const applyIndex = experimentCalls.findIndex((call) => call.name === "setup_deck_experiment");
+    console.log(`  the restore point is created before the profile mutation: ${
+      snapshotIndex >= 0 && applyIndex > snapshotIndex}`);
+    console.log(`  the snapshot receives the exact current Steam options: ${
+      experimentCalls[snapshotIndex]?.args[2] === "gamescope --mangoapp %command%"}`);
+    console.log(`  the profile keeps plugin frame generation off: ${
+      iniValues.FrameGen.Enabled === "false" && iniValues.FrameGen.FGInput === "nofg" &&
+      iniValues.FrameGen.FGOutput === "nofg"}`);
+    console.log(`  it selects INT8 mode 1 without relying on Fsr4Update: ${
+      iniValues.FSR.Fsr4ForceEnableInt8 === "1" && iniValues.FSR.Fsr4Update !== "true"}`);
+    await act(async () => pbz.root.unmount());
+    fixtures.get_game = previousGame;
+    fixtures.get_auto_plan = previousPlan;
+    fixtures.setup_deck_experiment = previousExperiment;
+    fixtures.create_restore_point = previousSnapshot;
+    (globalThis as any).SteamClient = undefined;
+  }
+
+  // -- rollback must distinguish unknown from recorded empty ---------------
+  console.log("\n=== restoring the previous install ===");
+  {
+    const previousGame = fixtures.get_game;
+    const previousRollback = fixtures.rollback_install;
+    const rollbackDetail = {
+      ...detail,
+      install: { ...detail.install, rollback: { available: true, version: "0.9.4", metadata: { launch_options: null as string | null } } },
+    };
+    fixtures.get_game = rollbackDetail;
+    let steamNow = "MANGOHUD=1 %command%";
+    let rejectSteamWrite = false;
+    const steamWrites: string[] = [];
+    (globalThis as any).SteamClient = {
+      Apps: {
+        GetAppLaunchOptions: async () => steamNow,
+        SetAppLaunchOptions: (_appid: number, value: string) => {
+          if (rejectSteamWrite) throw new Error("Steam rejected launch options");
+          steamWrites.push(value);
+          steamNow = value;
+        },
+      },
+    };
+    const recovery = await render(
+      "GameDetail (rollback)",
+      <GameDetail gamePath="/games/Cyberpunk 2077" gameName="Cyberpunk 2077" appid="1091500"
+        status={fixtures.get_status} runningGame={null} onBack={() => {}} />,
+    );
+    const restoreButton = () => findAll(recovery.host, '[data-mock="DialogButton"]')
+      .find((node) => node.textContent?.includes("Restore previous install")) as HTMLElement;
+
+    fixtures.rollback_install = { ok: true, launch_options: null };
+    await act(async () => restoreButton().click());
+    await settle(80);
+    console.log(`  null means unknown, so Steam is left untouched: ${
+      steamWrites.length === 0 && steamNow === "MANGOHUD=1 %command%"}`);
+    console.log(`  and the user gets manual recovery guidance: ${
+      recovery.host.textContent!.includes("left unchanged") &&
+      recovery.host.textContent!.includes("restore it manually")}`);
+
+    rollbackDetail.install.rollback.metadata.launch_options = "";
+    fixtures.rollback_install = { ok: true, launch_options: "" };
+    await act(async () => restoreButton().click());
+    await settle(80);
+    console.log(`  an empty string is a captured empty value, so Steam is cleared: ${
+      steamWrites.length === 1 && steamWrites[0] === "" && steamNow === ""}`);
+
+    rollbackDetail.install.rollback.metadata.launch_options = "gamemoderun %command%";
+    fixtures.rollback_install = { ok: true, launch_options: "gamemoderun %command%" };
+    rejectSteamWrite = true;
+    await act(async () => restoreButton().click());
+    await settle(80);
+    console.log(`  a rejected Steam setter leaves a retry action visible: ${
+      recovery.host.textContent!.includes("Retry launch options")}`);
+    rejectSteamWrite = false;
+    const retryLaunch = findAll(recovery.host, '[data-mock="DialogButton"]')
+      .find((node) => node.textContent?.trim() === "Retry launch options") as HTMLElement;
+    await act(async () => retryLaunch.click());
+    await settle();
+    console.log(`  retry restores the exact saved value: ${
+      steamNow === "gamemoderun %command%" && steamWrites[steamWrites.length - 1] === steamNow}`);
+    await act(async () => recovery.root.unmount());
+    fixtures.get_game = previousGame;
+    fixtures.rollback_install = previousRollback;
+    (globalThis as any).SteamClient = undefined;
   }
 
   // -- a wiki that will not download ----------------------------------------
@@ -1497,5 +1911,9 @@ async function render(name: string, element: React.ReactElement) {
   const real = errors.filter((e) => !e.includes("not wrapped in act"));
   console.log(`\n=== React errors/warnings: ${real.length} ===`);
   real.slice(0, 12).forEach((e) => console.log("  ! " + e.slice(0, 300)));
-  process.exit(real.length > 0 ? 1 : 0);
+  if (behaviorFailures.length) {
+    console.log(`\n=== behavior checks failed: ${behaviorFailures.length} ===`);
+    behaviorFailures.forEach((label) => console.log(`  ! ${label}`));
+  }
+  process.exit(real.length > 0 || behaviorFailures.length > 0 ? 1 : 0);
 })();
