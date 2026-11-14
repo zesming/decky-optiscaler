@@ -1,45 +1,38 @@
 # PBZ Steam Deck validation — 2026-11-14
 
-Recovery implementation: `96e21ff`; PBZ identity follow-up: `509fcf7`; package `0.0.8-pbz.1`, OptiScaler `0.9.5-pre5` (core PE `0.9.5.5`), community FSR `4.1.1b` INT8 model `1`. OptiScaler FG is disabled. This is an experimental result for one device, not a general compatibility certification.
+Package `0.0.8-pbz.2` uses the pinned OptiScaler `0.9.5-pre5` core and community FSR `4.1.1b`, INT8 model `1`, with OptiScaler FG disabled. This is one-device validation, without a measured image-quality, FPS-improvement or long-session stability claim.
 
-## Automated validation
+## Environment and deployment
 
-- Backend selftest: 401 passed, 0 failed. Historical positive live-ASI checks are unavailable for this beta; the old ABI reference remains separately pinned and its compiled binary is excluded.
-- FSR4 lifecycle: 15 passed. Recovery regressions: 58 passed.
-- UI harnesses: main flow, all options, live fields, shared config queues, shell launch options, and recovery UI all passed. The shell tests execute controlled fixtures to inspect the effective Wine environment. The main and recovery UI harnesses were rerun after the PBZ identity follow-up, including a delayed wiki response and an explicitly pinned wrong-folder install.
-- TypeScript, Rollup, generated schema/layout consistency, package inventory/hash checks and final-ZIP offline install/experiment/reapply/stock restore/rollback/Remove passed.
-- Test runs did not change repository Git configuration.
+Steam Deck OLED 1 TB, SteamOS 3.9.5, Decky Loader 3.3.1, Proton Experimental and Mesa 26.1.2. These were inspected, not upgraded. The same named plugin was replaced through Decky's normal install API; LSFG-VK and other plugins were preserved. Other games' installed files were not upgraded.
 
-## Device and deployment
+The game target is the main `PBZ.exe` directory at `PBZ/platform/steam`. The original plugin/settings, current Steam launch value, relevant game configuration and original game-file hashes are backed up privately. The plugin does not edit external game graphics settings or save progress.
 
-Steam Deck OLED 1 TB; SteamOS 3.9.5 stable, build 20261023.100; kernel 7.2.7-valve; Decky Loader 3.3.1. Actual PBZ process uses Proton Experimental (prefix version 11.0-100). Mesa reports 26.1.2; the installed RADV package is a SteamOS 26.2 development build. These were inspected, not installed or upgraded by this work.
+## Automated checks
 
-The existing OptiScaler plugin was replaced through Decky's normal authenticated install API. One active `Decky OptiScaler 0.0.8-pbz.1` instance remains. Existing LSFG-VK 0.14.4 and other plugins were left in place. Other games' files were not upgraded. The original plugin/settings, exact Steam launch options, relevant PBZ profile/configuration files and game-file hashes are backed up privately on the device.
+- The final native Windows executable ran under the device's Proton: **313 passed, 0 failed**. It exercises ABI reads/writes, all 14 live fields, menu side effects, capability/identity changes, mailbox timeout, FG active/paused observations and a hard-linked status temporary file.
+- Python protocol and actual Decky RPC tests exercise matching receipt identity and exact accepted keys, interrupted saves, directory authorization and no-overwrite behavior.
+- The isolated Linux backend suite covers recovery, FSR lifecycle and backend selftests. Corrected test fixtures and final changes receive focused reruns rather than repeating unaffected tests.
+- All six React harnesses, TypeScript and Rollup pass. Generated schema/layout, native source/binary identity, payload hashes and final-ZIP offline install/experiment/reapply/stock restore/rollback/Remove are checked.
 
-The old saved PBZ target pointed at auxiliary Unreal executables. The tested target is the actual main `PBZ.exe` directory, `PBZ/platform/steam`. Initial installation used the captured current Steam value in the same managed transaction. The tested merge was byte-identical to that value; the launch options were not effectively changed. A persistent restore point was created before the explicit community INT8 experiment.
+Synthetic tests are separate from actual game observations. They do not prove GPU effect for every option or hardware/API combination.
 
-Package SHA-256: `e4d9455064e05cc77c444304339c5c9c5db49ebff77d0b32e2f5cf2ee2ab51c9` (73,642,857 bytes). It was extracted and checked offline before deployment.
+## Real-game live control
 
-## Runtime observations and limits
+The game reached its main menu and continued into gameplay. The native module reported schema 7, the pinned core identity, verified physical game directory and a ready DX12 callback. The bridge identified the `fsr31` backend and exposed the available `4.1.1b`, `3.1.5` and `2.3.4` FFX list.
 
-The unmodified baseline and experimental build both reached the main menu after shader compilation. Cache state differs, so startup duration is not a performance comparison. The experimental log loads the pinned community DLL, installs the INT8 support/model hooks and lists upscaler index 0 as `4.1.1b` (`F5A5CA1E01001001`). New FFX contexts were created. Earlier `Depth not exist` messages need to be interpreted against the actual input and scene; a loaded DLL or provider list alone does not prove successful per-frame upscaling.
+Real RPC requests for Show FPS, sharpness override/value and FFX index 0 returned matching `config_request_accepted` receipts. A backend request to `fsr21` was followed by an independent runtime observation of `fsr21`; switching back was followed by `fsr31`. Rendering continued. Test settings were restored afterwards.
 
-During inspection the game menu was temporarily changed from XeSS to FSR; output scaling and other quality settings were not changed by the agent. The user then took control and requested log-only observation. No further UI input or disruptive operation is performed during that handoff. The plugin does not edit the game's external graphics profile.
+The receipt confirms OptiScaler accepted the configuration request, not that a new backend or FG output has already reached the GPU. Runtime backend, FG state and telemetry are separate observations; actual FFX index remains unknown. PBZ's configured `nofg` path intentionally exposes no OptiScaler FG controls, so FG GPU behavior was not exercised on this game. The complete field scope is covered by native and RPC tests instead of enabling FG alongside the user's LSFG setup.
 
-After the user exited the first run and switched to Gaming Mode, the frontend loaded one instance of `0.0.8-pbz.1`, the existing Decky WebSocket and plugin RPC remained usable, and the Decky service restart count remained zero. The user then launched PBZ again. That run loaded the pinned core and community DLL, recorded INT8 mode `1`, and created two FFX upscaler contexts. No `Depth not exist` messages were present in the observed second-run log. Two startup errors remained: model selection was not found in a second module, and the NVIDIA NGX OTA updater was unavailable. These are recorded without claiming that all render paths have been verified.
+Earlier user gameplay in Gaming Mode loaded the pinned community DLL and INT8 hooks and created FFX contexts. The user completed gameplay and exited before recovery testing. Startup diagnostics and a loaded provider list alone are not treated as proof of every per-frame path.
 
-The user completed a gameplay session and exited before recovery testing. Positive per-frame render/dispatch evidence and measured performance remain unverified. No FPS improvement or long-session stability claim is made.
+## Physical recovery and final configuration
 
-## Physical recovery and final state
+With the game closed, real plugin RPCs performed snapshot rollback, full Remove and reinstallation. Rollback matched all **38 snapshot records**, including bytes, modes and absent paths. Remove restored the **three original game files** (499,345,640 bytes) with exact SHA-256 and modes. Plugin control files, module, manifest and snapshot were absent afterwards. The game's own `D3D12` directory remained; it is distinct from plugin-owned `D3D12_Optiscaler`.
 
-The installed plugin's real RPCs performed snapshot rollback, full Remove and reinstallation, with the game closed. Rollback restored all 38 snapshot candidate records, including file bytes, permissions and absent paths; the saved per-game preferences and exact Steam launch string matched. The immutable point remained available for retry.
+The plugin then recreated the experiment and a fresh restore point. Current user settings were restored through the configuration API. Final configuration is FSR `4.1.1b`, INT8 `1`, backend `fsr31`, FG `Enabled=false` and `FGInput=FGOutput=nofg`. Existing Steam launch options and LSFG configuration remain in use. Saves are not rolled back.
 
-Before Remove, the earliest recorded Steam launch string was restored and verified. After Remove, all three original top-level game files (499,345,640 bytes total) matched their original SHA-256, sizes and modes. No managed files, support directories, launch record, manifest or snapshot remained. The game's separate `D3D12` directory was preserved byte-for-byte with its modes; the plugin-owned directory is `D3D12_Optiscaler`. The initial verification mistakenly treated every remaining directory as residue; the corrected check distinguishes game-owned and plugin-owned paths.
+The PR remains a draft in the user's fork. Official 0.9.5 must be repinned and revalidated before considering an upstream submission or merge.
 
-The experiment was then recreated through the plugin. All 18 managed file hashes and modes, including exact INI bytes, matched the pre-test state. All plugin settings, the current Steam launch string and all 21 current profile/save files matched their pre-test values. The fresh restore point is available, and the earliest original-game preference lineage remains intact. Community `4.1.1b`, INT8 mode `1` and OptiScaler FG-off remain configured; the game is left closed.
-
-The final package containing `509fcf7` was then installed in place. The deployed backend source hash matched the checkout, the new identity field was returned by the real RPC, and one frontend instance remained among the same 11 plugins with its existing WebSocket connected. Decky stayed active with zero service restarts. Managed files, exact INI, all plugin settings, Steam launch string and the current profile/save inventory were checked again and remained identical.
-
-PBZ-specific rules are isolated from generic games. Supplementary regressions cover explicitly choosing the PBZ wiki entry for a renamed shortcut, a missing cached row, a game-folder alias without optional lookup names, and a fuzzy result that must not authorize the special profile. The synchronous backend identity keeps UI guards active while the wiki lookup is pending; wrong-folder installs remain removable. Ordinary games keep their FG changes even when another game has the PBZ experiment enabled. The PR is to remain a draft until the official 0.9.5 release can be repinned and validated; no automatic merge is requested.
-
-Raw logs, screenshots, device addresses, credentials, exact user launch strings and profile/save backups are deliberately absent from this public-facing record.
+Raw logs, screenshots, addresses, credentials, exact launch strings and profile/save backups are deliberately excluded from this record.

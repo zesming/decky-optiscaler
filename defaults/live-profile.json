@@ -338,5 +338,11 @@
     "return_rva": 2790064,
     "call_before_return": "ffd7",
     "return_prologue": "4885db"
+  },
+  "ifg_state": {
+    "active": 536,
+    "waiting": 528,
+    "frames": 504,
+    "target": 544
   }
 }

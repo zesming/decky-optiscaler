@@ -143,8 +143,9 @@ class Plugin:
     async def rollback_install(self, target_dir: str, game_path: str = None) -> dict:
         return await self.service.rollback_install(target_dir, game_path)
 
-    async def setup_deck_experiment(self, target_dir: str, game_path: str = None) -> dict:
-        return await self.service.setup_deck_experiment(target_dir, game_path)
+    async def setup_deck_experiment(self, target_dir: str, game_path: str = None,
+                                    name: str = None) -> dict:
+        return await self.service.setup_deck_experiment(target_dir, game_path, name)
 
     # -- install ---------------------------------------------------------
     async def install(self, target_dir: str, filename: str = "dxgi.dll",

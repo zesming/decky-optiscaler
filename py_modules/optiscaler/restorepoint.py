@@ -313,7 +313,7 @@ def _snapshot_path(target):
     return _safe_path(target, RESTORE_DIR)
 
 
-def _load(target, validate_content=True):
+def _load(target):
     from . import installer
 
     path = _snapshot_path(target)
@@ -386,12 +386,16 @@ def create(target_dir, metadata):
     if not manifest:
         return {"available": False, "version": None,
                 "metadata": metadata if isinstance(metadata, dict) else {}}
-    installer._backup_items(target, manifest)
     if not isinstance(metadata, dict):
         raise TypeError("restore point metadata must be a JSON object")
     # Validate serializability before writing any content.
     metadata = json.loads(json.dumps(metadata, ensure_ascii=False))
     validate_metadata(metadata)
+    manifest_game_path = manifest.get("game_path")
+    if (isinstance(manifest_game_path, str) and manifest_game_path.strip()
+            and manifest_game_path != metadata["game_path"]):
+        raise ValueError("Restore point belongs to a different game.")
+    installer._backup_items(target, manifest)
     root = _snapshot_path(target)
     if _lstat(root):
         return info(target)

@@ -34,4 +34,6 @@ rm -f "$outdir/live.lib" "$outdir/$(basename "${out%.*}").pdb" "$outdir/${out##*
 
 echo "built $out ($(wc -c < "$out" | tr -d ' ') bytes)"
 
-python3 "$here/../scripts/live_metadata.py"
+if [[ "$outdir/$(basename "$out")" == "$(cd "$here/../bin" && pwd)/decky_optiscaler_live.asi" ]]; then
+  python3 "$here/../scripts/live_metadata.py"
+fi

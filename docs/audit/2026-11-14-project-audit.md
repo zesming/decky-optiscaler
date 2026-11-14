@@ -27,6 +27,8 @@
 
 补充兼容性检查确认 PBZ 的目录/版本约束与显式 INT8/FG-off 实验只作用于对应游戏；补充提交 `509fcf7` 覆盖“重命名快捷方式显式绑定 PBZ wiki 后仍拒绝正确目录”的边界，以及缓存缺失、模糊命中及异步查询期间的身份一致性，普通游戏继续使用通用计划。按用户要求，PR 保持 draft，等待正式 0.9.5 的固定来源与回归验证后再决定合入。
 
+当前 Live 适配补充：原生桥已按固定 pre5 核心重新实现并恢复完整 14 项能力；TS-05 已由真实 Windows/Proton 行为测试补齐。此前“整体禁用 Live”的描述仅记录 pbz.1 历史阶段，不代表 pbz.2。最终 PR 复审覆盖产品、UI、代码和测试，修复及精简结果见该 PR 最新审查评论；当前设备证据见验证记录。
+
 ## 项目画像
 
 SteamOS/Bazzite 的 Decky 插件，用手柄完成发现游戏、匹配 wiki、部署代理、设置 FSR/可选 FG、监控、卸载恢复。React/TypeScript 前端调用 main.py RPC 与 Python service/installer/wiki/autoplan；live ASI 依赖固定 OptiScaler 内部内存布局。现行捆绑 0.9.4 与旧 schema。测试为 Python 自测、FSR4 生命周期 unittest、三个 jsdom harness；CI 有类型、生成物、构建及打包，没有覆盖率/lint 配置。没有版本内 agent 指令文件；遵循本会话用户给定的工作原则。
@@ -203,7 +205,7 @@ SteamOS/Bazzite 的 Decky 插件，用手柄完成发现游戏、匹配 wiki、�
 - 本轮处置：按需应用的现有行为保留，将界面持续自动维护承诺改为准确的“安装/开启时应用，需要时重新应用”，不引入静默配置写入。
 
 ### [TS-05] ASI 的 ABI 检查主要匹配源码文本，缺少实际编译与内存写行为验证
-- 维度：测试 | 严重度：S2 | 工作量：M | 置信度：高 | 状态：另排（0.9.5 原生 ABI 需独立开发；本测试版已完全停用 live 并排除旧二进制）
+- 维度：测试 | 严重度：S2 | 工作量：M | 置信度：高 | 状态：已修复（edf984a；匹配 pre5 ABI、可运行 Windows 原生测试及 CI）
 - 位置：scripts/selftest.py:906-958、1658-1688、1752-1771、1872-1894；asi/msvc_abi.h:24-60、79-100；asi/live.cpp:1070-1100；.github/workflows/build.yml:44-63
 - 现象：ASI selftest 确实校验了 vendored 成员顺序、关键声明、版本 pin 和源码中的 `static_assert` 字符串；但没有编译这些断言，也没有执行 `CustomOptional.assign`、`msvc_string.assign_in_place` 或 `SetField`。已提交二进制只检查 MZ、若干导出/导入字符串。配置镜像重新生成检查也不能执行 C++ 编译期断言。
 - 依据：`selftest.py:1752-1761、1872-1885` 明确以 `static_assert(...` 子串存在作为通过条件；常规测试入口是生成脚本、Python 测试和前端构建，没有调用 `asi/build.sh`。`SetField` 直接把计算偏移处强转为 MSVC ABI mirror 并写入（`live.cpp:1074-1095`），字符串容量拒绝、可选值 engaged/isVolatile 的修改需要运行行为才能保护。`msvc_abi.h` 的具体赋值实现没有任何测试引用。

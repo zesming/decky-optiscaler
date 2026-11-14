@@ -235,10 +235,10 @@ def _assert_plain_tree(root):
                 raise ValueError(f"directory tree contains an unsafe object: {path}")
 
 
-def _merge_directory_tree(source, destination, target_dir=None, replace_files=None):
+def _merge_directory_tree(source, destination, target_dir, replace_files=None):
     """Restore pinned originals and missing legacy files without clobbering additions."""
     source, destination = Path(source), Path(destination)
-    game_target = Path(target_dir).resolve() if target_dir is not None else None
+    game_target = Path(target_dir).resolve()
     replace_files = set(replace_files or ())
     restore_files = set()
     deferred_files = set()
@@ -255,9 +255,8 @@ def _merge_directory_tree(source, destination, target_dir=None, replace_files=No
         relative_text = "." if not relative.parts else relative.as_posix()
         needed_dirs.add(relative_text)
         destination_dir = destination if relative_text == "." else destination / relative
-        if game_target is not None:
-            relative_dir = destination_dir.relative_to(game_target).as_posix()
-            _safe_path(game_target, relative_dir)
+        relative_dir = destination_dir.relative_to(game_target).as_posix()
+        _safe_path(game_target, relative_dir)
         mode = _existing_mode(destination_dir)
         if mode is not None and not stat.S_ISDIR(mode):
             raise ValueError(f"directory backup collides with a non-directory: {destination_dir}")
@@ -323,28 +322,13 @@ def _merge_directory_tree(source, destination, target_dir=None, replace_files=No
             mode = _existing_mode(item)
             if mode is not None and not stat.S_ISREG(mode):
                 raise ValueError(f"file backup collides with a non-file: {item}")
-            if game_target is not None:
-                # atomic_copy allocates its same-filesystem stage beside the
-                # destination and records that temporary in the active game
-                # transaction before publishing it. A hard exit therefore
-                # leaves a recoverable journal rather than an orphaned file.
-                atomic_copy(original, item, target_dir=game_target)
-                continue
-            fd, temporary = tempfile.mkstemp(prefix=f".{item.name}.decky-restore-",
-                                             dir=item.parent)
-            os.close(fd)
-            try:
-                shutil.copy2(original, temporary)
-                if game_target is not None:
-                    require_stopped_target(game_target)
-                os.replace(temporary, item)
-            finally:
-                Path(temporary).unlink(missing_ok=True)
+            # atomic_copy records its same-filesystem stage in the active game
+            # transaction, so a hard exit leaves a recoverable journal.
+            atomic_copy(original, item, target_dir=game_target)
     for source_dir, dest_dir in sorted(
             directory_pairs,
             key=lambda pair: len(pair[0].relative_to(source).parts), reverse=True):
-        if game_target is not None:
-            require_stopped_target(game_target)
+        require_stopped_target(game_target)
         if dest_dir.exists():
             shutil.copystat(source_dir, dest_dir, follow_symlinks=False)
     return sorted(deferred_files)
@@ -1862,6 +1846,7 @@ def install_plugin_file(target_dir, source, relative="plugins/OptiPatcher.asi", 
     recover_target_transactions(target)
     _preflight_live_control(target)
     require_stopped_target(target)
+    _preflight_canonical_install_paths(target, (relative,))
     with target_transaction(target, require_stopped=True):
         manifest = read_manifest(target)
         if not manifest:
@@ -2023,6 +2008,42 @@ def _casefold_root_child(target, name, description, allow_alias=False):
     return matches[0] if matches else target / name
 
 
+def _preflight_canonical_install_paths(target, names):
+    """Reject case-fold aliases along paths this install will write."""
+    target = Path(target).resolve()
+    for name in sorted({_relative_name(item) for item in names}):
+        current = target
+        parts = PurePosixPath(name).parts
+        for index, part in enumerate(parts):
+            if not _path_exists(current):
+                break
+            child = _casefold_root_child(current, part, f"install destination {name}")
+            mode = _existing_mode(child)
+            if index < len(parts) - 1:
+                if mode is not None:
+                    if stat.S_ISLNK(mode):
+                        raise ValueError(f"managed path crosses a symlink: {name}")
+                    if not stat.S_ISDIR(mode):
+                        raise ValueError(f"managed path parent is not a directory: {name}")
+            current = child
+        _safe_path(target, name)
+
+
+def _preflight_install_destinations(target, filename, reframework_files=None,
+                                    live_asi=None, optipatcher=None,
+                                    selected_build=False):
+    names = [filename, *PAYLOAD_DIRS, *RUNTIME_ARTIFACTS,
+             *(name for name in PAYLOAD_FILES
+               if not (selected_build and name == FFX_UPSCALER_DLL)),
+             *_payload_nested_names()]
+    names.extend(Path(source).name for source in reframework_files or ())
+    if live_asi is not None:
+        names.append(f"{live.PLUGIN_SUBDIR}/{live.ASI_NAME}")
+    if optipatcher is not None:
+        names.append(f"{live.PLUGIN_SUBDIR}/{OPTIPATCHER_NAME}")
+    _preflight_canonical_install_paths(target, names)
+
+
 def _simple_ini_values(path):
     """Read relevant INI keys using SimpleIni's case-insensitive lookup rules."""
     text = Path(path).read_text(encoding="utf-8-sig")
@@ -2078,7 +2099,6 @@ def _preflight_live_control(target, ini_path=None, live_asi=None,
                 "Cannot upgrade OptiScaler while Libraries.OptiDllPath is custom; restore it to auto first."
             )
 
-    control_paths = {}
     for name in live.CONTROL_FILES:
         path = _casefold_root_child(
             target, name, f"live-control file {name}",
@@ -2089,7 +2109,6 @@ def _preflight_live_control(target, ini_path=None, live_asi=None,
         mode = _existing_mode(path)
         if mode is not None and not stat.S_ISREG(mode):
             raise ValueError(f"Cannot safely inspect live-control path: {path}")
-        control_paths[name] = path
 
     return _preflight_live_asi_identity(
         target, live_asi, plugin_root, allow_plugin_alias=False
@@ -2130,10 +2149,11 @@ def install_live_component(target_dir, source, logger=None, plugin_root=None):
         raise ValueError("Install OptiScaler with this plugin before adding live control.")
     if not runtime_current(target):
         raise ValueError("Upgrade this game's OptiScaler core before installing live control.")
+    live_rel = f"{live.PLUGIN_SUBDIR}/{live.ASI_NAME}"
+    _preflight_canonical_install_paths(target, (live_rel,))
     _backup_items(target, manifest)
     _preflight_live_control(target, live_asi=source, plugin_root=plugin_root)
 
-    live_rel = f"{live.PLUGIN_SUBDIR}/{live.ASI_NAME}"
     with target_transaction(target, extra_names=live.CONTROL_FILES, require_stopped=True):
         require_stopped_target(target)
         manifest = read_manifest(target)
@@ -2325,6 +2345,10 @@ def install(target_dir, payload_root, filename=DEFAULT_PROXY, preserve_ini=True,
     source_dll = payload / "OptiScaler.dll"
 
     old_manifest = read_manifest(target) or {}
+    _preflight_install_destinations(
+        target, filename, reframework_files, live_asi, optipatcher,
+        selected_build=bool(old_manifest.get("fsr4_build")),
+    )
     _backup_items(target, old_manifest)
     _preflight_live_control(target, live_asi=live_asi, plugin_root=plugin_root)
     if not live_asi and _path_exists(_safe_path(target, f"{live.PLUGIN_SUBDIR}/{live.ASI_NAME}")):

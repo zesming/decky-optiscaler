@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'py_modules'))
-from optiscaler import constants, gameprofiles, installer, live, payload, restorepoint
+from optiscaler import constants, fsr4build, gameprofiles, installer, live, payload, restorepoint
 from optiscaler.inifile import IniFile
 from optiscaler.service import OptiScalerService
 
@@ -80,6 +80,39 @@ class RecoveryTests(unittest.TestCase):
     def install(self, **kwargs):
         return installer.install(self.game, self.source, **kwargs)
 
+    def prepare_pbz_install(self, root):
+        root = Path(root)
+        target = root / 'platform' / 'steam'
+        target.mkdir(parents=True)
+        (target / 'PBZ.exe').write_bytes(b'MZ')
+        installed = asyncio.run(self.service.install(str(target), game_path=str(root)))
+        self.assertTrue(installed['ok'], installed)
+        metadata = {
+            'game_path': str(root),
+            'game_settings': self.service.settings.snapshot_game(str(root)),
+            'launch_options': '',
+        }
+        point = restorepoint.create(target, metadata)
+        self.assertTrue(point['available'], point)
+        return target
+
+    def assert_service_commit_failure(self, operation):
+        persist = installer._persist_transaction
+        failed = False
+
+        def fail_once(state, target, status='active'):
+            nonlocal failed
+            if status == 'committed' and not failed:
+                failed = True
+                raise OSError('injected transaction commit marker failure')
+            return persist(state, target, status)
+
+        with patch.object(installer, '_persist_transaction', side_effect=fail_once):
+            result = operation()
+        self.assertTrue(failed)
+        self.assertFalse(result['ok'], result)
+        return result
+
     def test_existing_ini_survives_both_install_modes_and_remove(self):
         original_ini = b'; original comments\r\n[FrameGen]\r\nEnabled=true\r\n'
         for preserve in (True, False):
@@ -106,6 +139,25 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.install()
         self.assertEqual(tree(self.game), self.original)
+
+    def test_install_refuses_root_and_nested_payload_case_aliases_without_writes(self):
+        for index, relative in enumerate((
+                'LibXeSS.dll', 'Licenses/directx_license.txt',
+                'licenses/DirectX_LICENSE.txt')):
+            with self.subTest(relative=relative):
+                target = self.root / f'case-alias-{index}'
+                target.mkdir()
+                (target / 'dxgi.dll').write_bytes(b'original proxy')
+                (target / 'user.txt').write_bytes(b'unrelated user file')
+                alias = target / relative
+                alias.parent.mkdir(parents=True, exist_ok=True)
+                alias.write_bytes(b'case-sensitive original')
+                before = filesystem_state(target)
+
+                with self.assertRaisesRegex(ValueError, 'noncanonical install destination'):
+                    installer.install(target, self.source)
+
+                self.assertEqual(filesystem_state(target), before)
 
     def test_first_install_hard_exit_restores_nested_payload_and_reframework_original(self):
         runtime_manifest = json.loads((ROOT / 'defaults/runtime-manifest.json').read_text())
@@ -586,6 +638,59 @@ with installer.target_transaction(target, require_stopped=True):
         self.assertEqual(self.service.settings.get_target(game), 'original-target')
         self.assertTrue(self.service.settings.get_pref('auto_mode:' + game))
 
+    def test_rollback_commit_marker_failure_restores_game_preferences(self):
+        self.install()
+        game = '/games/rollback-commit-failure'
+        snapshot_settings = {'target': 'snapshot target', 'auto': False, 'experiment': False}
+        restorepoint.create(self.game, {
+            'game_path': game, 'game_settings': snapshot_settings,
+            'launch_options': 'snapshot options',
+        })
+        before_settings = {'target': 'current target', 'auto': True, 'experiment': True}
+        self.service.settings.restore_game(game, before_settings)
+        before_files = tree(self.game)
+
+        self.assert_service_commit_failure(lambda: asyncio.run(
+            self.service.rollback_install(str(self.game), game)))
+
+        self.assertEqual(self.service.settings.snapshot_game(game), before_settings)
+        self.assertEqual(tree(self.game), before_files)
+
+    def test_experiment_commit_marker_failure_restores_game_preferences(self):
+        root = self.root / 'Phantom Blade Zero'
+        target = self.prepare_pbz_install(root)
+        game = str(root)
+        before_settings = {'target': 'current target', 'auto': True, 'experiment': False}
+        self.service.settings.restore_game(game, before_settings)
+        before_files = tree(target)
+
+        with patch.object(fsr4build, 'fetch', return_value='synthetic-fsr4.dll'), \
+             patch.object(installer, 'install_fsr4_build', return_value={'build': {}}), \
+             patch.object(self.service, '_write_config_sync', return_value={
+                 'ok': True, 'applied': [], 'rejected': [],
+             }):
+            self.assert_service_commit_failure(lambda: asyncio.run(
+                self.service.setup_deck_experiment(str(target), game)))
+
+        self.assertEqual(self.service.settings.snapshot_game(game), before_settings)
+        self.assertEqual(tree(target), before_files)
+
+    def test_uninstall_commit_marker_failure_restores_game_preferences(self):
+        game = '/games/uninstall-commit-failure'
+        original_settings = {'target': 'original target', 'auto': False, 'experiment': True}
+        self.service.settings.restore_game(game, original_settings)
+        installed = asyncio.run(self.service.install(str(self.game), game_path=game))
+        self.assertTrue(installed['ok'], installed)
+        before_settings = {'target': 'current target', 'auto': True, 'experiment': False}
+        self.service.settings.restore_game(game, before_settings)
+        before_files = tree(self.game)
+
+        self.assert_service_commit_failure(lambda: asyncio.run(
+            self.service.uninstall(str(self.game))))
+
+        self.assertEqual(self.service.settings.snapshot_game(game), before_settings)
+        self.assertEqual(tree(self.game), before_files)
+
     def test_failed_first_service_install_leaves_no_launch_record_or_preferences(self):
         game = '/games/failed'
         with patch.object(self.service.settings, 'configure_game', side_effect=OSError('settings disk failure')):
@@ -1051,6 +1156,23 @@ with installer.target_transaction(target, require_stopped=True):
         path.write_text(json.dumps(record))
         with self.assertRaises(ValueError):
             restorepoint.info(self.game)
+
+    def test_restore_point_refuses_a_different_manifest_game_before_writing(self):
+        self.install()
+        manifest = installer.read_manifest(self.game)
+        manifest['game_path'] = '/games/installed'
+        (self.game / constants.MANIFEST_NAME).write_text(json.dumps(manifest))
+        before = filesystem_state(self.game)
+        metadata = {
+            'game_path': '/games/other',
+            'game_settings': {'target': None, 'auto': None, 'experiment': None},
+            'launch_options': '',
+        }
+
+        with self.assertRaisesRegex(ValueError, 'different game'):
+            restorepoint.create(self.game, metadata)
+
+        self.assertEqual(filesystem_state(self.game), before)
 
     def test_unmanaged_incremental_installs_are_refused_without_writes(self):
         source = self.root / 'unmanaged-support'; source.mkdir()
@@ -1674,11 +1796,42 @@ with installer.target_transaction(sys.argv[2],include_known=False):
         canonical.mkdir(parents=True); (canonical / 'PBZ.exe').write_bytes(b'MZ')
         self.assertIsNone(gameprofiles.target_for(
             root, 'Phantom Blade Zero fan game', 'My PBZ collection'))
+        self.assertFalse(gameprofiles.is_pbz('PBZ test server'))
+        self.assertFalse(gameprofiles.is_pbz('Phantom Blade Zero fan game'))
+        self.assertTrue(gameprofiles.is_pbz('PHANTOM BLADE ZERO'))
+        self.assertTrue(gameprofiles.is_pbz('P.B.Z.'))
+        self.assertTrue(gameprofiles.is_pbz('影之刃零'))
         unrelated = gameprofiles.recommendation(
             {'matched': True, 'game': 'My PBZ collection'}, 'My renamed title')
         plan = gameprofiles.constrain({}, unrelated)
         self.assertNotIn('required_target', plan)
         self.assertFalse(unrelated.get('required_target'))
+
+    def test_non_pbz_game_can_install_snapshot_but_cannot_start_pbz_experiment(self):
+        root = self.root / 'PBZ test server'
+        target = self.prepare_pbz_install(root)
+        self.assertTrue(restorepoint.info(target)['available'])
+
+        with patch.object(fsr4build, 'fetch', side_effect=AssertionError('fetch should not run')):
+            result = asyncio.run(self.service.setup_deck_experiment(
+                str(target), str(root), 'PBZ test server'))
+
+        self.assertFalse(result['ok'], result)
+
+    def test_exact_pbz_name_allows_experiment_for_a_renamed_game_path(self):
+        root = self.root / 'Renamed Steam shortcut'
+        target = self.prepare_pbz_install(root)
+        with patch.object(fsr4build, 'fetch', return_value='synthetic-fsr4.dll'), \
+             patch.object(installer, 'install_fsr4_build', return_value={'build': {}}), \
+             patch.object(self.service, '_write_config_sync', return_value={
+                 'ok': True, 'applied': [], 'rejected': [],
+             }):
+            result = asyncio.run(self.service.setup_deck_experiment(
+                str(target), str(root), 'Phantom Blade Zero'))
+
+        self.assertTrue(result['ok'], result)
+        self.assertTrue(self.service.settings.get_pref(
+            'deck-experiment:' + str(root), False))
 
     def test_fuzzy_pbz_wiki_match_does_not_grant_pbz_profile_or_target_identity(self):
         root = self.root / 'Phantom Blade Zero fan game'

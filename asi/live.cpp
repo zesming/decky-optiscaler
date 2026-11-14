@@ -287,11 +287,14 @@ static bool FgObject(Snapshot* s) {
     !ReadBytes((void*)complete,&root,8)||root!=(uintptr_t)g_coreBase+(fsr?fg_offsets_root_vbtable_rva:xefg_offsets_root_vbtable_rva)||
     !ReadBytes((void*)(s->currentFg-4),&displacement,4)||displacement!=0||
     !ReadBytes((void*)(complete+base-4),&baseDisplacement,4)||baseDisplacement!=0)return false;
- BYTE active=0;
+ BYTE active=0,waiting=0;uint64_t frames=0,target=0;
  if(!ReadBytes((void*)(complete+8),&s->fgSwapContext,8)||
-    !ReadBytes((void*)(complete+base+536),&active,1)||active>1||
+    !ReadBytes((void*)(complete+base+ifg_state_active),&active,1)||active>1||
+    !ReadBytes((void*)(complete+base+ifg_state_waiting),&waiting,1)||waiting>1||
+    !ReadBytes((void*)(complete+base+ifg_state_frames),&frames,8)||
+    !ReadBytes((void*)(complete+base+ifg_state_target),&target,8)||
     !ReadBytes((void*)(complete+base+xefg_gates_ifg_constants_flags),&s->fgConstantsFlags,xefg_gates_flags_size))return false;
- s->fgActive=active;s->fgObjectKind=fsr?2:4;
+ s->fgActive=(active||waiting)&&!(target&&target>=frames);s->fgObjectKind=fsr?2:4;
  return true;
 }
 static bool FfxBackend(unsigned api,const char* code) {
@@ -660,7 +663,8 @@ static void WriteStatus() {
  b.put("telemetry_ready %u\ntelemetry_source %s\nfeature_progress_age_ms %llu\n",telemetry?1:0,!telemetry?"unknown":s.presentCounterFps>0?"state_present_counter":(s.renderedMs>0||s.presentedMs>0)?"core_intervals":"unknown",(unsigned long long)(s.featureProgressTick?GetTickCount64()-s.featureProgressTick:UINT64_MAX));
  if(!b.ok)return;
  wchar_t tmp[MAX_PATH];if(!JoinPath(tmp,L"decky_optiscaler_live.status.tmp"))return;
- HANDLE h=CreateFileW(tmp,GENERIC_WRITE,FILE_SHARE_READ,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL);if(h==INVALID_HANDLE_VALUE)return;
+ DeleteFileW(tmp); // Remove only the old temporary name; never truncate an existing inode.
+ HANDLE h=CreateFileW(tmp,GENERIC_WRITE,FILE_SHARE_READ,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);if(h==INVALID_HANDLE_VALUE)return;
  DWORD written=0;bool success=WriteFile(h,b.body,(DWORD)b.used,&written,NULL)&&written==b.used;CloseHandle(h);
  if(success)MoveFileExW(tmp,g_statusPath,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);else DeleteFileW(tmp);
 }

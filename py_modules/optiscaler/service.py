@@ -723,24 +723,32 @@ class OptiScalerService:
                     saved_game = metadata.get("game_path")
                     if saved_game and game_path and saved_game != game_path:
                         raise ValueError("Restore point belongs to a different game.")
+                    before = self.settings.snapshot_game(saved_game) if saved_game else None
+                    preferences_changed = False
                     # Keep the restore point until Remove so a Steam setter failure can be retried.
-                    with installer.target_transaction(target_dir, require_stopped=True):
-                        restored = restorepoint.restore(target_dir)
-                        if saved_game and metadata.get("game_settings") is not None:
-                            self.settings.restore_game(saved_game, metadata["game_settings"])
+                    try:
+                        with installer.target_transaction(target_dir, require_stopped=True):
+                            restored = restorepoint.restore(target_dir)
+                            if saved_game and metadata.get("game_settings") is not None:
+                                self.settings.restore_game(saved_game, metadata["game_settings"])
+                                preferences_changed = True
+                    except Exception:
+                        if preferences_changed:
+                            self.settings.restore_game(saved_game, before)
+                        raise
                     return {"ok": True, **restored, "launch_options": metadata.get("launch_options"),
                             "restart_required": True}
                 return await self._run(work)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    async def setup_deck_experiment(self, target_dir, game_path=None):
+    async def setup_deck_experiment(self, target_dir, game_path=None, game_name=None):
         """Explicit opt-in: community FSR4.1 INT8 with OptiScaler FG disabled."""
         try:
-            if not game_path or not (gameprofiles.is_pbz(Path(game_path).name) or
-                                     gameprofiles.target_for(game_path, "Phantom Blade Zero")):
+            if not game_path:
                 raise ValueError("This experiment is only defined for Phantom Blade Zero.")
-            expected = gameprofiles.target_for(game_path, "Phantom Blade Zero")
+            wiki_identity = self.settings.get_wiki_entry(game_path)
+            expected = gameprofiles.target_for(game_path, game_name, wiki_identity)
             if not expected or Path(expected).resolve() != Path(target_dir).resolve():
                 raise ValueError("Choose the main PBZ.exe folder at PBZ/platform/steam before starting the experiment.")
             build = fsr4build.find("4.1.1b")
@@ -756,16 +764,24 @@ class OptiScalerService:
                     self._validate_restore_metadata(point.get("metadata"))
                     if point["metadata"].get("game_path") != game_path:
                         raise ValueError("Restore point belongs to a different game.")
-                    with installer.target_transaction(target_dir, require_stopped=True):
-                        result = installer.install_fsr4_build(target_dir, dll, build, self.log, True)
-                        written = self._write_config_sync(target_dir, [
-                            {"section": "FrameGen", "key": "Enabled", "value": "false"},
-                            {"section": "FrameGen", "key": "FGInput", "value": "nofg"},
-                            {"section": "FrameGen", "key": "FGOutput", "value": "nofg"},
-                        ])
-                        if not written.get("ok") or written.get("rejected"):
-                            raise ValueError(written.get("error") or "Could not disable OptiScaler frame generation")
-                        self.settings.set_pref(_experiment_key(game_path), True)
+                    before = self.settings.snapshot_game(game_path)
+                    preferences_changed = False
+                    try:
+                        with installer.target_transaction(target_dir, require_stopped=True):
+                            result = installer.install_fsr4_build(target_dir, dll, build, self.log, True)
+                            written = self._write_config_sync(target_dir, [
+                                {"section": "FrameGen", "key": "Enabled", "value": "false"},
+                                {"section": "FrameGen", "key": "FGInput", "value": "nofg"},
+                                {"section": "FrameGen", "key": "FGOutput", "value": "nofg"},
+                            ])
+                            if not written.get("ok") or written.get("rejected"):
+                                raise ValueError(written.get("error") or "Could not disable OptiScaler frame generation")
+                            self.settings.set_pref(_experiment_key(game_path), True)
+                            preferences_changed = True
+                    except Exception:
+                        if preferences_changed:
+                            self.settings.restore_game(game_path, before)
+                        raise
                     return {"ok": True, **result, "restart_required": True,
                             "manual_steps": list(gameprofiles.PBZ_STEPS)}
                 return await self._run(work)
@@ -884,10 +900,19 @@ class OptiScalerService:
                 def work():
                     installer.recover_target_transactions(target_dir)
                     manifest = installer.read_manifest(target_dir) or {}
-                    with installer.target_transaction(target_dir, extra_names=(restorepoint.RESTORE_DIR,), require_stopped=True):
-                        result = installer.uninstall(target_dir, remove_ini, self.log)
-                        if manifest.get("game_path") and manifest.get("game_settings_before") is not None:
-                            self.settings.restore_game(manifest["game_path"], manifest["game_settings_before"])
+                    game_path = manifest.get("game_path")
+                    before = self.settings.snapshot_game(game_path) if game_path else None
+                    preferences_changed = False
+                    try:
+                        with installer.target_transaction(target_dir, extra_names=(restorepoint.RESTORE_DIR,), require_stopped=True):
+                            result = installer.uninstall(target_dir, remove_ini, self.log)
+                            if game_path and manifest.get("game_settings_before") is not None:
+                                self.settings.restore_game(game_path, manifest["game_settings_before"])
+                                preferences_changed = True
+                    except Exception:
+                        if preferences_changed:
+                            self.settings.restore_game(game_path, before)
+                        raise
                     return result
                 result = await self._run(work)
             return {"ok": True, **result}

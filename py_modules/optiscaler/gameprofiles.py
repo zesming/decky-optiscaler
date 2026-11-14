@@ -2,7 +2,6 @@
 
 from pathlib import Path
 from .constants import OPTISCALER_VERSION
-from .wiki import normalize
 
 PBZ_WIKI = "https://github.com/optiscaler/OptiScaler/wiki/Phantom-Blade-Zero"
 PBZ_TARGET = "PBZ/platform/steam"
@@ -16,7 +15,8 @@ PBZ_STEPS = [
 
 def is_pbz(name):
     value = str(name or "").strip()
-    return value == "影之刃零" or normalize(value) in {"phantombladezero", "pbz"}
+    key = "".join(character for character in value.casefold() if character.isalnum())
+    return key in {"影之刃零", "phantombladezero", "pbz"}
 
 
 def has_pbz_identity(game_path=None, name=None, wiki_identity=None, extra_names=None):

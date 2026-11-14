@@ -261,7 +261,7 @@ def emit_profile(profile):
              "#pragma once", "#include <stdint.h>", "namespace runtime_profile {"]
     for key in ("profile_id", "build_id", "source_commit", "core_sha256"):
         lines.append(f'inline constexpr char {key}[] = "{profile[key]}";')
-    for group in ("pe", "sizes", "rva", "state_offsets", "feature_offsets", "limits", "fg_offsets", "xefg_offsets", "xefg_gates", "dlss_version"):
+    for group in ("pe", "sizes", "rva", "state_offsets", "feature_offsets", "limits", "fg_offsets", "xefg_offsets", "xefg_gates", "dlss_version", "ifg_state"):
         for key, value in profile[group].items():
             lines.append(f"inline constexpr uint32_t {group}_{key} = {value}u;")
     for key in ("guid_bytes",):
@@ -329,6 +329,9 @@ def main():
     for name, offset in profile["state_offsets"].items():
         if facts["classes"]["State"]["fields"][name] != offset:
             raise SystemExit(f"State::{name} differs from the matching PDB")
+    ifg_fields = feature_facts["classes"]["IFGFeature"]["fields"]
+    if profile["ifg_state"] != {key: ifg_fields[field] for key, field in {"active": "_isActive", "waiting": "_waitingNewFrameData", "frames": "_frameCount", "target": "_targetFrame"}.items()}:
+        raise SystemExit("FG activity offsets differ from the matching PDB")
     dlss_version = profile["dlss_version"]
     proof = feature_facts["live_apply_proofs"]
     version_proof = proof["feature_version"]

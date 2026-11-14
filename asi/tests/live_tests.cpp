@@ -372,6 +372,24 @@ static void TestMenuSideEffectsAndInactiveFGOptions() {
     }
 }
 
+static void TestFgRuntimeActivity() {
+    for(unsigned output=2;output<=4;output+=2) {
+        Fixture fixture;
+        fixture.MakeFG(output);
+        const size_t base=output==2?fg_offsets_virtual_base:xefg_offsets_virtual_base;
+        CHECK(fixture.SnapshotNow().fgActive);
+        fixture.fg[base+ifg_state_active]=0;
+        CHECK(!fixture.SnapshotNow().fgActive);
+        fixture.fg[base+ifg_state_waiting]=1;
+        CHECK(fixture.SnapshotNow().fgActive);
+        *reinterpret_cast<uint64_t*>(fixture.fg+base+ifg_state_frames)=10;
+        *reinterpret_cast<uint64_t*>(fixture.fg+base+ifg_state_target)=10;
+        CHECK(!fixture.SnapshotNow().fgActive);
+        *reinterpret_cast<uint64_t*>(fixture.fg+base+ifg_state_frames)=11;
+        CHECK(fixture.SnapshotNow().fgActive);
+    }
+}
+
 static void TestSelectionAndDirectoryRejection() {
     Fixture fixture;
     Snapshot original = fixture.SnapshotNow();
@@ -464,6 +482,27 @@ static void TestNoCallbackReleasesMailbox() {
     CHECK(!strcmp(g_result.ack, "config_request_accepted"));
 }
 
+static void TestStatusTemporaryDoesNotTruncateHardlink() {
+    Fixture fixture;
+    wchar_t temp[MAX_PATH],dir[MAX_PATH],source[MAX_PATH],alias[MAX_PATH];
+    CHECK(GetTempPathW(MAX_PATH,temp)>0);
+    CHECK(GetTempFileNameW(temp,L"dky",0,dir));
+    CHECK(DeleteFileW(dir));CHECK(CreateDirectoryW(dir,NULL));
+    wcscpy(g_parentDirectory,dir);
+    CHECK(JoinPath(source,L"user.txt"));CHECK(JoinPath(alias,L"decky_optiscaler_live.status.tmp"));
+    CHECK(JoinPath(g_statusPath,L"decky_optiscaler_live.status"));
+    HANDLE file=CreateFileW(source,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
+    CHECK(file!=INVALID_HANDLE_VALUE);DWORD written=0;
+    CHECK(WriteFile(file,"user",4,&written,NULL));CloseHandle(file);
+    CHECK(CreateHardLinkW(alias,source,NULL));
+    g_snapshot=fixture.SnapshotNow();WriteStatus();
+    file=CreateFileW(source,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    CHECK(file!=INVALID_HANDLE_VALUE);char bytes[5]={};DWORD read=0;
+    CHECK(ReadFile(file,bytes,4,&read,NULL)&&read==4&&!strcmp(bytes,"user"));CloseHandle(file);
+    CHECK(DeleteFileW(source));CHECK(DeleteFileW(g_statusPath));CHECK(RemoveDirectoryW(dir));
+    g_parentDirectory[0]=g_statusPath[0]=0;
+}
+
 static void TestBootstrapCallerFingerprint() {
     BYTE* image = static_cast<BYTE*>(VirtualAlloc(
         NULL, pe_size_of_image, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
@@ -520,11 +559,13 @@ static void TestSha256() {
 
 int main(int argc, char** argv) {
     TestBootstrapCallerFingerprint();
+    TestStatusTemporaryDoesNotTruncateHardlink();
     TestSha256();
     TestProtocol();
     TestAllMenuOperations();
     TestBackendAcknowledgesOnlyConfiguration();
     TestMenuSideEffectsAndInactiveFGOptions();
+    TestFgRuntimeActivity();
     TestSelectionAndDirectoryRejection();
     TestMailboxAndCallback();
     TestNoCallbackReleasesMailbox();

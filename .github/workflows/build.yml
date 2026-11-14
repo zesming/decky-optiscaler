@@ -109,10 +109,10 @@ jobs:
     name: Windows native bridge tests
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - name: Preserve source bytes before checkout
+        run: git config --global core.autocrlf false
 
-      - name: Keep source bytes identical across build hosts
-        run: git -c core.autocrlf=false -c core.eol=lf checkout-index --force --all
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v6
         with:

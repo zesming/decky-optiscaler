@@ -103,7 +103,7 @@
       "bytes": 16947
     }
   },
-  "live_control_supported": false,
+  "live_control_supported": true,
   "community": {
     "repository": "the3rdparty1917/fsr4xyz",
     "tag": "4.1.1b",

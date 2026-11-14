@@ -54,10 +54,6 @@ SCALAR_KEYS = (
     "XeFG.InterpolationCount", "Sharpness.OverrideSharpness",
     "Sharpness.Sharpness", "Menu.ShowFps",
 )
-FG_SCALAR_KEYS = (
-    "FrameGen.DebugView",
-    "OptiFG.MakeDepthCopy", "OptiFG.HUDFixExtended",
-)
 BACKEND_KEY_BY_API = {
     "dx11": "Upscalers.Dx11Upscaler",
     "dx12": "Upscalers.Dx12Upscaler",
@@ -574,13 +570,6 @@ def _manifest_identity(target_dir, source, plugin_root=None):
     return True, None, info, install_base_ready
 
 
-def _can_install(target_dir, source, plugin_root, install_base_ready):
-    """Whether a stopped repair can safely add or replace the live ASI."""
-    return _live_control_preflight(
-        target_dir, source, plugin_root, install_base_ready
-    )[0]
-
-
 def _live_control_preflight(target_dir, source, plugin_root, install_base_ready=True):
     """Return installability and live-write safety from one path preflight."""
     if not install_base_ready:
@@ -930,18 +919,10 @@ def status(target_dir, source=None, plugin_root=None):
     raw_seq = raw.get("seq") if _valid_seq(raw.get("seq")) else None
     if raw_seq is not None:
         report["seq"] = raw_seq
-    ack = raw.get("ack") if raw.get("ack") in (
-        "pending", "config_request_accepted", "rejected", "timeout"
-    ) else None
     result_directory_generation = _directory_generation(
         raw.get("result_directory_generation"), allow_zero=True
     )
     report["result_directory_generation"] = str(result_directory_generation) if result_directory_generation is not None else None
-    same_command = bool(
-        command and report["session"]
-        and command.get("session") == report["session"]
-        and command.get("seq") == raw_seq
-    )
     ack = _matching_receipt(raw, command)
     command_matches = bool(
         raw_identity and ack is not None and report["dir_matches"] is True
@@ -1198,6 +1179,9 @@ def _write_command(target, body):
     target = Path(target)
     path = _control_path(target, CMD_FILE)
     temp = _control_path(target, CMD_TEMP_FILE)
+    encoded = body.encode("utf-8")
+    if len(encoded) > 4096:
+        raise ValueError("live command exceeds the schema-7 byte limit")
     for candidate in (path, temp):
         try:
             mode = candidate.lstat().st_mode
@@ -1205,10 +1189,8 @@ def _write_command(target, body):
             continue
         if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
             raise ValueError(f"live-control path is not a regular file: {candidate}")
-    encoded = body.encode("utf-8")
-    if len(encoded) > 4096:
-        raise ValueError("live command exceeds the schema-7 byte limit")
-    with temp.open("wb") as handle:
+    temp.unlink(missing_ok=True)
+    with temp.open("xb") as handle:
         handle.write(encoded)
         handle.flush()
         os.fsync(handle.fileno())

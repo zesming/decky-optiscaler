@@ -949,6 +949,23 @@ class LiveStatusAndProtocolTests(LiveFixture):
         self.assertIn("Menu.ShowFps", waiting["deferred"])
         self.assertIn(live.FFX_FG_ID, waiting["deferred"])
 
+    def test_hardlinked_command_temp_does_not_modify_the_user_file(self):
+        user_file = self.root / "user-owned.txt"
+        original = b"user bytes that must remain unchanged"
+        user_file.write_bytes(original)
+        temp = self.target / live.CMD_TEMP_FILE
+        os.link(user_file, temp)
+        self.emulator()
+
+        result = live.apply_changes(self.target, [{
+            "section": "Menu", "key": "ShowFps", "value": "true",
+        }], source=self.source, plugin_root=self.plugin_root)
+
+        self.assertTrue(result["sent"], result)
+        self.assertEqual(user_file.read_bytes(), original)
+        command = self.target / live.CMD_FILE
+        self.assertNotEqual(user_file.stat().st_ino, command.stat().st_ino)
+
     def test_pending_timeout_does_not_allow_command_overwrite_until_session_changes(self):
         peer = self.emulator()
         peer.set_behavior("pending")

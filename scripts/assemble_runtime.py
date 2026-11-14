@@ -52,7 +52,7 @@ def main():
             response = subprocess.check_output(['gh','api',f'repos/optiscaler/OptiScaler/contents/OptiScaler.ini?ref={COMMIT}'])
             ini = base64.b64decode(json.loads(response)['content'])
         (stage/'OptiScaler.ini').write_bytes(ini)
-        inventory = {str(p.relative_to(stage)): {'bytes':p.stat().st_size,'sha256':digest(p)}
+        inventory = {p.relative_to(stage).as_posix(): {'bytes':p.stat().st_size,'sha256':digest(p)}
                      for p in stage.rglob('*') if p.is_file()}
         if inventory != expected['files']:
             raise ValueError('Component inventory differs from the reviewed runtime pin')
