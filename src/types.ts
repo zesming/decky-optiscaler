@@ -161,6 +161,7 @@ export interface GameDetail {
   target_is_saved: boolean;
   /** Backend-confirmed canonical PBZ.exe folder, null if missing. */
   pbz_target?: string | null;
+  pbz_identity?: boolean;
   candidates: ExeCandidate[];
   install: InstallInfo;
   launch_option: string;

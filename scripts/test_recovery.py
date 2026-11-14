@@ -822,6 +822,202 @@ with installer.target_transaction(sys.argv[2],include_known=False):
         with patch.object(gameprofiles, 'OPTISCALER_VERSION', '0.9.4'):
             self.assertFalse(gameprofiles.constrain({}, recommendation)['runtime_supported'])
 
+    def test_pinned_pbz_identity_resolves_renamed_root_for_detail_and_automatic_setup(self):
+        root = self.root / 'My game'
+        canonical = root / 'platform/steam'
+        canonical.mkdir(parents=True)
+        (canonical / 'PBZ.exe').write_bytes(b'MZ')
+        # This higher ranked candidate has no OptiScaler install. A PBZ pin
+        # should make the canonical folder the initial setup target.
+        decoy = root / 'OtherGame/Binaries/Win64'
+        decoy.mkdir(parents=True)
+        (decoy / 'OtherGame-Win64-Shipping.exe').write_bytes(b'MZ')
+        self.service.settings.set_wiki_entry(str(root), 'Phantom Blade Zero')
+
+        recommendation = {'matched': True, 'game': 'Phantom Blade Zero',
+                          'filename': 'dxgi.dll', 'filename_source': 'wiki entry',
+                          'detail': {}, 'compatibility': '✅'}
+        base_plan = {'available': True, 'filename': 'dxgi.dll', 'optipatcher': False,
+                     'settings': []}
+        original_detect = installer.detect
+
+        def detect_with_decoy_install(path):
+            if Path(path) == decoy:
+                return {'path': str(decoy), 'installed': True, 'filename': 'dxgi.dll'}
+            return original_detect(path)
+
+        detail = asyncio.run(self.service.get_game(str(root), 'My Steam shortcut'))
+        with patch.object(installer, 'detect', side_effect=detect_with_decoy_install):
+            existing_wrong_folder = asyncio.run(
+                self.service.get_game(str(root), 'My Steam shortcut'))
+        with patch.object(self.service.wiki, 'entry_by_name', return_value={'name': 'Phantom Blade Zero'}), \
+             patch.object(self.service.wiki, 'recommend_entry', return_value=recommendation), \
+             patch('optiscaler.service.autoplan.build', return_value=base_plan):
+            planned = asyncio.run(self.service.get_auto_plan('My Steam shortcut', game_path=str(root)))
+
+        self.assertEqual(detail['pbz_target'], str(canonical))
+        self.assertEqual(detail['target'], str(canonical))
+        self.assertTrue(detail['pbz_identity'])
+        self.assertEqual(existing_wrong_folder['pbz_target'], str(canonical))
+        self.assertEqual(existing_wrong_folder['target'], str(decoy))
+        self.assertEqual(planned['recommendation']['game'], 'Phantom Blade Zero')
+        self.assertEqual(planned['plan']['required_target'], 'PBZ/platform/steam')
+
+        self.service.get_auto_plan = AsyncMock(return_value=planned)
+        self.service.install = AsyncMock(return_value={'ok': True, 'applied': []})
+        wrong_target = self.root / 'wrong-target'; wrong_target.mkdir()
+        rejected_install = asyncio.run(self.service.auto_install(
+            str(wrong_target), str(root), 'My Steam shortcut'))
+        self.assertFalse(rejected_install['ok'])
+        self.service.install.assert_not_awaited()
+
+        installed = asyncio.run(self.service.auto_install(
+            str(canonical), str(root), 'My Steam shortcut'))
+        self.assertTrue(installed['ok'], installed)
+        self.service.install.assert_awaited_once()
+
+        self.service._write_config_sync = lambda target, changes: {
+            'ok': True, 'applied': [], 'rejected': []}
+        with patch('optiscaler.service.autoplan.setting_changes', return_value=[]), \
+             patch('optiscaler.service.autoplan.framegen_changes', return_value=[]):
+            rejected_settings = asyncio.run(self.service.apply_auto_settings(
+                str(wrong_target), str(root), 'My Steam shortcut'))
+            self.assertFalse(rejected_settings['ok'])
+            applied_settings = asyncio.run(self.service.apply_auto_settings(
+                str(canonical), str(root), 'My Steam shortcut'))
+        self.assertTrue(applied_settings['ok'], applied_settings)
+
+    def test_pbz_root_basename_can_supply_recommendation_identity(self):
+        root = self.root / 'PBZ'
+        canonical = root / 'platform/steam'
+        canonical.mkdir(parents=True)
+        (canonical / 'PBZ.exe').write_bytes(b'MZ')
+        empty = {'matched': False, 'searched': [], 'entry_count': 0,
+                 'list_available': False, 'near_misses': [], 'game': None,
+                 'page': None, 'filename': 'dxgi.dll', 'filename_source': 'default',
+                 'alternatives': [], 'compatibility': None, 'inputs': None,
+                 'notes': None, 'optipatcher': False, 'wiki_url': None,
+                 'detail': {}, 'detail_pending': False, 'list_meta': {},
+                 'match_score': None}
+        empty.update(matched=True, game='Unrelated Game', filename='winmm.dll',
+                     alternatives=['version.dll'], optipatcher=True,
+                     detail={'Settings': 'UnrelatedSetting=true'})
+        base_plan = {'available': True, 'filename': 'dxgi.dll', 'optipatcher': False,
+                     'settings': []}
+        with patch.object(self.service.wiki, 'recommend', return_value=empty), \
+             patch('optiscaler.service.autoplan.build', return_value=base_plan):
+            planned = asyncio.run(self.service.get_auto_plan(
+                'My renamed shortcut', game_path=str(root)))
+        self.assertTrue(planned['recommendation']['required_target'])
+        self.assertEqual(planned['plan']['required_target'], 'PBZ/platform/steam')
+        self.assertEqual(planned['recommendation']['alternatives'], [])
+        self.assertFalse(planned['recommendation']['optipatcher'])
+        self.assertNotIn('Settings', planned['recommendation']['detail'])
+
+    def test_pbz_identity_requires_an_exact_known_title(self):
+        root = self.root / 'renamed'; canonical = root / 'platform/steam'
+        canonical.mkdir(parents=True); (canonical / 'PBZ.exe').write_bytes(b'MZ')
+        self.assertIsNone(gameprofiles.target_for(
+            root, 'Phantom Blade Zero fan game', 'My PBZ collection'))
+        unrelated = gameprofiles.recommendation(
+            {'matched': True, 'game': 'My PBZ collection'}, 'My renamed title')
+        plan = gameprofiles.constrain({}, unrelated)
+        self.assertNotIn('required_target', plan)
+        self.assertFalse(unrelated.get('required_target'))
+
+    def test_fuzzy_pbz_wiki_match_does_not_grant_pbz_profile_or_target_identity(self):
+        root = self.root / 'Phantom Blade Zero fan game'
+        canonical = root / 'platform/steam'
+        canonical.mkdir(parents=True)
+        (canonical / 'PBZ.exe').write_bytes(b'MZ')
+        entries = [{'name': 'Phantom Blade Zero', 'key': 'phantombladezero',
+                    'page': None, 'compatibility': '✅', 'inputs': 'DLSSG via SL',
+                    'optipatcher': False, 'notes': ''}]
+        base_plan = {'available': True, 'filename': 'dxgi.dll', 'optipatcher': False,
+                     'settings': []}
+        with patch.object(self.service.wiki, 'load_entries',
+                          return_value=(entries, {'source': 'test-cache'})), \
+             patch('optiscaler.service.autoplan.build', return_value=base_plan):
+            planned = asyncio.run(self.service.get_auto_plan(
+                'Phantom Blade Zero fan game', game_path=str(root)))
+
+        detail = asyncio.run(self.service.get_game(str(root), 'Phantom Blade Zero fan game'))
+        self.assertEqual(planned['recommendation']['game'], 'Phantom Blade Zero')
+        self.assertGreater(planned['recommendation']['match_score'], 0.78)
+        self.assertNotIn('required_target', planned['recommendation'])
+        self.assertNotIn('required_target', planned['plan'])
+        self.assertFalse(detail['pbz_identity'])
+        self.assertIsNone(detail['pbz_target'])
+
+    def test_missing_pinned_pbz_row_uses_offline_profile_without_unrelated_match(self):
+        root = self.root / 'Renamed shortcut'
+        self.service.settings.set_wiki_entry(str(root), 'Phantom Blade Zero')
+        empty = {'matched': False, 'searched': [], 'entry_count': 2,
+                 'list_available': True, 'near_misses': [], 'game': None,
+                 'page': None, 'filename': 'dxgi.dll', 'filename_source': 'default',
+                 'alternatives': [], 'compatibility': None, 'inputs': None,
+                 'notes': None, 'optipatcher': False, 'wiki_url': None,
+                 'detail': {}, 'detail_pending': False, 'list_meta': {'source': 'cache'},
+                 'match_score': None}
+        unrelated = {**empty, 'matched': True, 'game': 'Phantom Blade Zero fan game',
+                     'detail': {'Notes': 'unrelated settings'}, 'filename': 'winmm.dll'}
+
+        def recommend(query, extra_names=None, force=False):
+            return empty if not query else unrelated
+
+        base_plan = {'available': True, 'filename': 'dxgi.dll', 'optipatcher': False,
+                     'settings': []}
+        with patch.object(self.service.wiki, 'entry_by_name', return_value=None), \
+             patch.object(self.service.wiki, 'recommend', side_effect=recommend) as recommend_mock, \
+             patch('optiscaler.service.autoplan.build', return_value=base_plan):
+            planned = asyncio.run(self.service.get_auto_plan(
+                'My renamed Steam shortcut', game_path=str(root)))
+
+        recommend_mock.assert_called_once_with('', [], False)
+        recommendation = planned['recommendation']
+        self.assertTrue(recommendation['matched'])
+        self.assertEqual(recommendation['game'], 'Phantom Blade Zero')
+        self.assertEqual(recommendation['filename_source'], 'reviewed wiki profile')
+        self.assertEqual(recommendation['detail']['Notes'],
+                         'Keep Super Resolution Output Scale at 100%; only change the upscaler preset.')
+        self.assertNotEqual(recommendation['detail'].get('Notes'), 'unrelated settings')
+        self.assertEqual(recommendation['searched'], ['My renamed Steam shortcut'])
+        self.assertEqual(planned['plan']['required_target'], 'PBZ/platform/steam')
+
+    def test_generic_automatic_setup_and_settings_keep_their_existing_path_rules(self):
+        root = self.root / 'Generic Game'
+        target = root / 'platform/steam'
+        target.mkdir(parents=True)
+        (target / 'PBZ.exe').write_bytes(b'MZ')
+        self.service.settings.set_wiki_entry(str(root), 'Unrelated Compatibility Entry')
+        detail = asyncio.run(self.service.get_game(str(root), 'Generic Game'))
+        self.assertIsNone(detail['pbz_target'])
+
+        planned = {'recommendation': {'matched': True, 'game': 'Generic Game'},
+                   'plan': {'available': True, 'filename': 'dxgi.dll', 'optipatcher': False,
+                            'settings': []}}
+        self.service.get_auto_plan = AsyncMock(return_value=planned)
+        self.service.install = AsyncMock(return_value={'ok': True, 'applied': []})
+        other_pbz_path = str(self.root / 'Other PBZ game')
+        self.service.settings.set_pref('deck-experiment:' + other_pbz_path, True)
+        frame_changes = [{'section': 'FrameGen', 'key': 'FGInput', 'value': 'fsrfg'}]
+        written = []
+
+        def record_write(directory, changes):
+            written.extend(changes)
+            return {'ok': True, 'applied': list(changes), 'rejected': []}
+
+        self.service._write_config_sync = record_write
+        with patch('optiscaler.service.autoplan.setting_changes', return_value=[]), \
+             patch('optiscaler.service.autoplan.framegen_changes', return_value=frame_changes):
+            installed = asyncio.run(self.service.auto_install(
+                str(target), str(root), 'Generic Game'))
+            configured = asyncio.run(self.service.apply_auto_settings(
+                str(target), str(root), 'Generic Game'))
+        self.assertTrue(installed['ok'], installed)
+        self.assertTrue(configured['ok'], configured)
+        self.assertEqual(written, frame_changes)
+
 
 class PayloadCompletionTests(unittest.TestCase):
     def test_committed_cache_rejects_extra_nested_files_and_null_inventory(self):

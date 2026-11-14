@@ -1,4 +1,4 @@
-import { isPbzTitle, pbzTargetMismatch } from "../gameTarget";
+import { hasPbzIdentity, pbzTargetMismatch } from "../gameTarget";
 import {
   ButtonItem,
   DialogButton,
@@ -207,7 +207,7 @@ export function GameDetail({
     reload: reloadPlan,
   } = useAutoPlan(gamePath, gameName);
   const requiredTargetMismatch = detail && pbzTargetMismatch(detail,
-    Boolean(plan?.required_target) || isPbzTitle(gameName), targetDir ?? detail.target);
+    Boolean(plan?.required_target) || hasPbzIdentity(detail), targetDir ?? detail.target);
 
   /**
    * Switching automatic on re-applies the wiki's settings; switching it off
@@ -228,7 +228,7 @@ export function GameDetail({
         if (!runtimeCurrent) {
           throw new Error("Upgrade runtime in Setup before applying automatic settings.");
         }
-        if (detail && pbzTargetMismatch(detail, Boolean(plan?.required_target) || isPbzTitle(gameName), targetDir)) {
+        if (detail && pbzTargetMismatch(detail, Boolean(plan?.required_target) || hasPbzIdentity(detail), targetDir)) {
           throw new Error("Choose the main PBZ.exe folder at PBZ/platform/steam in Setup first.");
         }
         await config.flush();

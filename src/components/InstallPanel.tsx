@@ -1,4 +1,4 @@
-import { normalizeGamePath, pbzTargetMismatch } from "../gameTarget";
+import { hasPbzIdentity, normalizeGamePath, pbzTargetMismatch } from "../gameTarget";
 import {
   ButtonItem,
   ConfirmModal,
@@ -124,7 +124,7 @@ export function InstallPanel({ detail, status, appid, live, onBeforeMutation, on
     reload: lookup,
   } = useAutoPlan(detail.path, detail.name);
 
-  const targetRequirement = plan?.required_target ?? (isPbzName(detail.name) ? "PBZ/platform/steam" : null);
+  const targetRequirement = plan?.required_target ?? (hasPbzIdentity(detail) ? "PBZ/platform/steam" : null);
   const inspectedTarget = detail.install.installed ? detail.install.path : target;
   const requiredTargetMismatch = pbzTargetMismatch(detail, Boolean(targetRequirement), inspectedTarget);
   const targetWritable = detail.candidates.find((candidate) => normalizeGamePath(candidate.path) === normalizeGamePath(target))?.writable
@@ -685,11 +685,6 @@ function shorten(path: string, keep = 3) {
 }
 
 
-
-function isPbzName(name: string) {
-  const value = name.trim().toLowerCase();
-  return value === "pbz" || value === "phantom blade zero" || value === "影之刃零";
-}
 
 /** The wiki cells contain markdown links and AsciiDoc markup. */
 function stripMarkdown(text: string) {

@@ -1,4 +1,4 @@
-import { canonicalPbzTarget, pbzTargetMismatch } from "../gameTarget";
+import { canonicalPbzTarget, hasPbzIdentity, pbzTargetMismatch } from "../gameTarget";
 import {
   DialogButton,
   Field,
@@ -234,7 +234,7 @@ function settingsSummary(plan: AutoPlan) {
 const PBZ_PLAN_NAMES = new Set(["pbz", "phantom blade zero", "影之刃零"]);
 
 function isPbzPlan(plan: AutoPlan | null | undefined) {
-  return Boolean(plan?.game && PBZ_PLAN_NAMES.has(plan.game.trim().toLocaleLowerCase()));
+  return Boolean(plan?.required_target && plan.game && PBZ_PLAN_NAMES.has(plan.game.trim().toLocaleLowerCase()));
 }
 
 function plainWikiText(value: string) {
@@ -545,7 +545,7 @@ export function SetupChecklist({
   // A missing or unknown runtime identity is read-only too. The backend only
   // enables schema-specific writes after matching the installed proxy hash.
   const runtimeCurrent = detail.install.managed && detail.install.runtime_current === true;
-  const isPbzGame = isPbzPlan(planned) || PBZ_PLAN_NAMES.has(detail.name.trim().toLocaleLowerCase());
+  const isPbzGame = isPbzPlan(planned) || hasPbzIdentity(detail);
   const requiredTarget = planned?.required_target ?? (isPbzGame ? "PBZ/platform/steam" : null);
   const expectedPbzTarget = canonicalPbzTarget(detail);
   const actualTarget = detail.install.installed ? detail.install.path : detail.target;

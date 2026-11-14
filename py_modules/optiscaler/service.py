@@ -342,6 +342,9 @@ class OptiScalerService:
             for candidate in candidates:
                 candidate["writable"] = Path(candidate["path"]).is_dir() and os.access(candidate["path"], os.W_OK)
             saved_target = self.settings.get_target(str(path))
+            pinned_wiki_entry = self.settings.get_wiki_entry(str(path))
+            pbz_identity = gameprofiles.has_pbz_identity(path, name, pinned_wiki_entry)
+            pbz_target = gameprofiles.target_for(path, name, pinned_wiki_entry)
 
             detection = None
             for candidate in candidates:
@@ -357,8 +360,10 @@ class OptiScalerService:
                 target = detection["path"]
             elif saved_target:
                 target = saved_target
-            elif gameprofiles.target_for(path, name):
-                target = gameprofiles.target_for(path, name)
+            elif pbz_target:
+                # With no installed or saved target, honor the selected PBZ
+                # wiki identity even when the folder and shortcut are renamed.
+                target = pbz_target
             elif candidates:
                 target = candidates[0]["path"]
             else:
@@ -380,13 +385,14 @@ class OptiScalerService:
                 }
             return {
                 "ini_info": ini_info,
-                "wiki_entry": self.settings.get_wiki_entry(str(path)),
+                "wiki_entry": pinned_wiki_entry,
                 "fsr4_sources": installer.find_fsr4_sources(self.home),
                 "gpu": gpu_info(),
                 "path": str(path),
                 "name": name or path.name,
                 "target": target,
-                "pbz_target": gameprofiles.target_for(path, name),
+                "pbz_identity": pbz_identity,
+                "pbz_target": pbz_target,
                 "target_is_saved": bool(saved_target),
                 "candidates": candidates,
                 "install": info,
@@ -588,11 +594,20 @@ class OptiScalerService:
                 result = await self._run(self.wiki.recommend_entry, entry, force)
                 if not force:
                     self.refresh_page_if_stale(entry.get("page"))
-                return gameprofiles.recommendation(result, name, extra_names)
+                return gameprofiles.recommendation(result, name, extra_names, pinned, game_path)
+            if gameprofiles.is_pbz(pinned):
+                # A selected PBZ row can disappear from the cached list while
+                # offline. Start with the wiki's standard unmatched response
+                # so no guessed title contributes settings or detail, then
+                # apply only the reviewed PBZ fallback profile.
+                result = await self._run(self.wiki.recommend, "", [], force)
+                result["searched"] = [n for n in [name, *(extra_names or [])] if n]
+                result["manual"] = True
+                return gameprofiles.recommendation(result, pinned, game_path=game_path)
         result = await self._run(self.wiki.recommend, name, extra_names, force)
         if not force:
             self.refresh_page_if_stale(result.get("page"))
-        return gameprofiles.recommendation(result, name, extra_names)
+        return gameprofiles.recommendation(result, name, extra_names, game_path=game_path)
 
     async def refresh_wiki(self):
         entries, meta = await self._run(self.wiki.load_entries, True)
@@ -634,7 +649,8 @@ class OptiScalerService:
         if not plan["available"] or plan.get("runtime_supported") is False:
             return {"ok": False, "error": plan.get("blocked_reason") or "No supported compatibility entry matched this game", **planned}
         if plan.get("required_target"):
-            expected = gameprofiles.target_for(game_path, name) if game_path else None
+            pinned = self.settings.get_wiki_entry(game_path) if game_path else None
+            expected = gameprofiles.target_for(game_path, name, pinned, extra_names) if game_path else None
             if not expected or Path(expected).resolve() != Path(target_dir).resolve():
                 return {"ok": False, "error": "Choose the main PBZ.exe folder at PBZ/platform/steam in Manual setup before installing.", **planned}
         result = await self.install(target_dir, plan["filename"], True, plan["optipatcher"],
@@ -652,7 +668,8 @@ class OptiScalerService:
         if not plan["available"] or plan.get("runtime_supported") is False:
             return {"ok": False, "error": plan.get("blocked_reason") or "No supported compatibility entry matched this game", **planned}
         if plan.get("required_target"):
-            expected = gameprofiles.target_for(game_path, name) if game_path else None
+            pinned = self.settings.get_wiki_entry(game_path) if game_path else None
+            expected = gameprofiles.target_for(game_path, name, pinned, extra_names) if game_path else None
             if not expected or Path(expected).resolve() != Path(target_dir).resolve():
                 return {"ok": False, "error": "Choose the main PBZ.exe folder at PBZ/platform/steam before applying settings.", **planned}
         try:

@@ -6,11 +6,13 @@
 - Add an explicit Steam Deck / LSFG experiment, pre-experiment restore points, and full removal of new experiment resources.
 - Preserve original INI/files, user launch wrappers and component ownership; recover failed file transactions.
 - Correct automatic-setting refresh, failed optimistic writes and cross-game async state; strengthen behavior assertions.
-- Disable the incompatible 0.9.4 live ASI. Settings require restarting the game. Physical Steam Deck/PBZ validation remains pending.
+- Disable the incompatible 0.9.4 live ASI. Settings require restarting the game.
+- Verify Gaming Mode loading and real snapshot/Remove/reinstall recovery on one OLED; restore the exact managed configuration and retain the user's saves. No measured FPS or long-session stability claim is made.
+- Keep PBZ's special target/version rules per game, including explicitly selected wiki identities for renamed shortcuts, while preserving generic plans for other games.
 
 
 Newest first. Each release ships `Decky OptiScaler.zip` for Decky Loader's
-*Install from URL* (Developer mode), and bundles **OptiScaler 0.9.4**.
+*Install from URL* (Developer mode). The experimental build above pins **OptiScaler 0.9.5-pre5**; historical releases below bundle **0.9.4**.
 
 ## [Unreleased]
 

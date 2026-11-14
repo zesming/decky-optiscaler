@@ -12,6 +12,12 @@ This build is a test package, not a verified game compatibility result. It bundl
 
 The setup notes stay visible even without a network connection. This package does not copy NVIDIA DLLs out of the game or edit Engine.ini. The core contains the upstream PBZ extended DLL search and input quirks.
 
+## Game-specific compatibility
+
+PBZ's directory/version requirements apply to its recognized title, folder alias, or explicitly selected PBZ wiki entry. Renamed non-Steam shortcuts can select that entry manually, but the canonical directory must still contain `PBZ.exe`. A missing executable or wrong Unreal folder blocks setup until corrected; an existing wrong-folder install remains removable.
+
+Other games keep their own wiki plans, install targets and configuration. The community INT8/FG-off experiment is an explicit action for this game, not a global default. Basic's FSR preset remains separate from FG. The shared core upgrade and disabled live ASI apply to this plugin build generally; updating the plugin alone does not upgrade every game's installed files.
+
 ## Verify in game
 
 Use a recent Proton build with the VKD3D support required by FSR 4.1. Record the exact SteamOS, Mesa and Proton versions when reporting results; the plugin does not install or change them. The baseline path here is DX12 through Proton, not the experimental Vulkan-with-DX12 interop mode.
@@ -33,7 +39,7 @@ A failed file/configuration commit must leave the pre-operation files and manife
 
 - [PBZ compatibility page](https://github.com/optiscaler/OptiScaler/wiki/Phantom-Blade-Zero): requires 0.9.5+, special folder and 100% output scale; tested on Windows 11 / RX 9070XT.
 - [Official build run](https://github.com/optiscaler/OptiScaler/actions/runs/43116305456), source commit `6cbd89b887f5f186c294e2fe2b3024692ea21007`, artifact `13898752558`. Its raw archive SHA-256 is `3835c3a80847bae2a9bb5d873a42e43d7cf504b172650bb54b7659b67e7fdf27`; the core PE version is `0.9.5.5`. This exact prerelease includes the PBZ fixes; this does not mean arbitrary prereleases satisfy a final-version requirement.
-- [Stable 0.9.4 support bundle](https://github.com/optiscaler/OptiScaler/releases/tag/v0.9.4): the core-only artifact does not contain SDK dependencies. Its existing FFX SDK 2.2 / stock 4.1.1 and other support files are retained. DX12 export/structure compatibility was inspected; the combined Proton/game path remains unverified. This is a repacked Decky payload, not an upstream full 0.9.5 release.
+- [Stable 0.9.4 support bundle](https://github.com/optiscaler/OptiScaler/releases/tag/v0.9.4): the core-only artifact does not contain SDK dependencies. Its existing FFX SDK 2.2 / stock 4.1.1 and other support files are retained. DX12 export/structure compatibility was inspected; one OLED/Proton device initialized the combined path, without proving every render path or performance. This is a repacked Decky payload, not an upstream full 0.9.5 release.
 - [Community 4.1.1b](https://github.com/the3rdparty1917/fsr4xyz/releases/tag/4.1.1b): archive and extracted DLL are independently hash checked. No claim of a native Navi2/FP8 model is made.
 
 Exact hashes and sizes of every payload input are in `defaults/runtime-manifest.json`. The old ABI references remain in source for future work; the old compiled ASI is excluded from the zip.

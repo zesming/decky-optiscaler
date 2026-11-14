@@ -1432,7 +1432,7 @@ async function render(name: string, element: React.ReactElement) {
     fixtures.get_auto_plan = {
       ...previousPlan,
       recommendation: { ...previousPlan.recommendation, game: "Phantom Blade Zero" },
-      plan: { ...previousPlan.plan, game: "Phantom Blade Zero", runtime_supported: true },
+      plan: { ...previousPlan.plan, game: "Phantom Blade Zero", required_target: "PBZ/platform/steam", runtime_supported: true },
     };
     fixtures.create_restore_point = { ok: true, available: true };
     fixtures.setup_deck_experiment = () => {
@@ -1477,6 +1477,82 @@ async function render(name: string, element: React.ReactElement) {
     console.log(`  it selects INT8 mode 1 without relying on Fsr4Update: ${
       iniValues.FSR.Fsr4ForceEnableInt8 === "1" && iniValues.FSR.Fsr4Update !== "true"}`);
     await act(async () => pbz.root.unmount());
+
+    // The explicitly selected wiki identity also works for renamed shortcuts.
+    const renamedPath = "/games/custom-shortcut";
+    fixtures.get_game = {
+      ...fixtures.get_game, path: renamedPath, name: "My shortcut",
+      wiki_entry: "Phantom Blade Zero", pbz_identity: true,
+      target: `${renamedPath}/PBZ/platform/steam`,
+      pbz_target: `${renamedPath}/PBZ/platform/steam`,
+      candidates: [{ path: `${renamedPath}/PBZ/platform/steam`, relative: "PBZ/platform/steam", score: 55, executables: ["PBZ.exe"], writable: true }],
+      install: { ...detail.install, path: `${renamedPath}/PBZ/platform/steam`, runtime_current: true },
+    };
+    const renamed = await render("GameDetail (renamed PBZ shortcut)",
+      <GameDetail gamePath={renamedPath} gameName="My shortcut" appid="1091500"
+        status={fixtures.get_status} runningGame={null} onBack={() => {}} />);
+    const renamedAction = findAll(renamed.host, '[data-mock="DialogButton"]')
+      .find((node) => node.textContent?.includes("Set up the FSR 4.1 experiment")) as HTMLButtonElement | undefined;
+    console.log(`  an explicit PBZ wiki identity enables the renamed shortcut: ${Boolean(renamedAction) && renamedAction?.getAttribute("data-disabled") !== "true"}`);
+    await act(async () => renamed.root.unmount());
+
+    fixtures.get_game = { ...fixtures.get_game, pbz_target: null };
+    const missing = await render("GameDetail (PBZ executable missing)",
+      <GameDetail gamePath={renamedPath} gameName="My shortcut" appid="1091500"
+        status={fixtures.get_status} runningGame={null} onBack={() => {}} />);
+    console.log(`  an authoritative missing executable still blocks the experiment: ${
+      !findAll(missing.host, '[data-mock="DialogButton"]').some((node) => node.textContent?.includes("Set up the FSR 4.1 experiment"))}`);
+    await act(async () => missing.root.unmount());
+
+    fixtures.get_auto_plan = previousPlan;
+    fixtures.get_game = { ...detail, path: "/games/ordinary-shortcut", pbz_target: null };
+    const ordinary = await render("GameDetail (ordinary game)",
+      <GameDetail gamePath="/games/ordinary-shortcut" gameName="Cyberpunk 2077" appid="1091500"
+        status={fixtures.get_status} runningGame={null} onBack={() => {}} />);
+    console.log(`  an ordinary game receives no PBZ action or folder requirement: ${
+      !ordinary.host.textContent?.includes("Phantom Blade Zero") &&
+      !ordinary.host.textContent?.includes("PBZ/platform/steam")}`);
+    await act(async () => ordinary.root.unmount());
+
+    fixtures.get_auto_plan = {
+      ...previousPlan,
+      plan: { ...previousPlan.plan, game: "Phantom Blade Zero", required_target: undefined },
+    };
+    fixtures.get_game = { ...detail, path: "/games/near-name", name: "Phantom Blade Zero fan game", pbz_target: null, pbz_identity: false };
+    const fuzzy = await render("GameDetail (unconfirmed fuzzy PBZ title)",
+      <GameDetail gamePath="/games/near-name" gameName="Phantom Blade Zero fan game" appid="1091500"
+        status={fixtures.get_status} runningGame={null} onBack={() => {}} />);
+    console.log(`  a fuzzy wiki result alone cannot enable the PBZ experiment: ${
+      !findAll(fuzzy.host, '[data-mock="DialogButton"]').some((node) => node.textContent?.includes("Set up the FSR 4.1 experiment")) &&
+      !fuzzy.host.textContent?.includes("PBZ/platform/steam")}`);
+    await act(async () => fuzzy.root.unmount());
+
+    const pendingAnswers: Array<(value: unknown) => void> = [];
+    fixtures.get_auto_plan = () => new Promise((resolve) => pendingAnswers.push(resolve));
+    const pendingPath = "/games/pinned-pending";
+    const wrongTarget = `${pendingPath}/ProjectPBZ/Binaries/Win64`;
+    fixtures.get_game = {
+      ...detail, path: pendingPath, name: "My shortcut", wiki_entry: "Phantom Blade Zero",
+      pbz_identity: true, pbz_target: `${pendingPath}/platform/steam`, target: wrongTarget,
+      install: { ...detail.install, path: wrongTarget },
+      candidates: [{ path: wrongTarget, relative: "ProjectPBZ/Binaries/Win64", score: 100, executables: ["helper.exe"], writable: true }],
+    };
+    const { InstallPanel } = await import("../src/components/InstallPanel");
+    const pendingManual = await render("InstallPanel (pinned PBZ lookup pending)",
+      <InstallPanel detail={fixtures.get_game} status={fixtures.get_status} appid="1091500"
+        live={fixtures.get_live_status} onChanged={async () => {}} />);
+    const reinstall = findAll(pendingManual.host, '[data-mock="ButtonItem"]')
+      .find((node) => node.textContent?.includes("Reinstall as")) as HTMLButtonElement | undefined;
+    console.log(`  a pinned PBZ wrong folder is blocked before its wiki lookup returns: ${reinstall?.getAttribute("data-disabled") === "true"}`);
+    await act(async () => pendingManual.root.unmount());
+    const pendingDetail = await render("GameDetail (pinned wrong folder lookup pending)",
+      <GameDetail gamePath={pendingPath} gameName="My shortcut" appid="1091500"
+        status={fixtures.get_status} runningGame={null} onBack={() => {}} />);
+    const removeWrong = findAll(pendingDetail.host, '[data-mock="DialogButton"]')
+      .find((node) => node.textContent?.trim() === "Remove") as HTMLButtonElement | undefined;
+    console.log(`  the detected wrong-folder install remains removable during lookup: ${Boolean(removeWrong) && removeWrong?.getAttribute("data-disabled") !== "true"}`);
+    await act(async () => pendingDetail.root.unmount());
+    await act(async () => { for (const resolve of pendingAnswers) resolve(previousPlan); });
     fixtures.get_game = previousGame;
     fixtures.get_auto_plan = previousPlan;
     fixtures.setup_deck_experiment = previousExperiment;
