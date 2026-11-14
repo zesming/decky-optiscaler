@@ -11,6 +11,7 @@ import {
 import { toaster } from "@decky/api";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { applyAutoSettings, getGame, rollbackInstall, setAutoMode, setupDeckExperiment } from "../api";
+import { clearTargetLiveActions, forgetTargetLiveRecord } from "../config/liveRecord";
 import { invalidateTargetReads, serializeTargetWrite } from "../config/writeRecord";
 import { TABS, optionsInSection } from "../config/tabs";
 import { AUTO } from "../config/values";
@@ -367,6 +368,7 @@ export function GameDetail({
       invalidateTargetReads(detail.install.path);
       const result = await rollbackInstall(detail.install.path, gamePath);
       if (!result.ok) throw new Error(result.error ?? "Could not restore the previous install.");
+      forgetTargetLiveRecord(detail.install.path);
       let steamRestored = !appid;
       if (appid) {
         if (typeof result.launch_options !== "string") {
@@ -425,12 +427,12 @@ export function GameDetail({
       const snapshot = await preserveExistingInstall(targetDir, gamePath, appid);
       if (!snapshot.ok) throw new Error(snapshot.error ?? "Could not preserve the current install.");
       const result = await serializeTargetWrite(targetDir, () =>
-        setupDeckExperiment(targetDir, gamePath),
+        setupDeckExperiment(targetDir, gamePath, gameName),
       );
       invalidateTargetReads(targetDir);
       if (!result.ok) throw new Error(result.error ?? "Could not set up the PBZ experiment.");
       await config.authoritativeReload();
-      config.markDirty();
+      clearTargetLiveActions(targetDir);
       await load();
       toaster.toast({
         title: "PBZ FSR 4.1 experiment is ready",
@@ -554,6 +556,7 @@ export function GameDetail({
                 await refreshLive();
                 await reloadPlan(false);
               }}
+              onRemoved={() => forgetTargetLiveRecord(detail.install.path, true)}
               onReloadPlan={() => reloadPlan(false)}
               onRestore={restorePreviousInstall}
               restoreBusy={restoreBusy}

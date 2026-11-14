@@ -21,7 +21,7 @@ import { LiveOutcome } from "../src/components/LiveOutcome";
 import { LivePanel } from "../src/components/LivePanel";
 import { LiveStats } from "../src/components/LiveStats";
 import { QuickPanel } from "../src/components/QuickPanel";
-import { liveFfxVersionChoices } from "../src/liveControl";
+import { liveFfxVersionChoices, liveStatusMessage } from "../src/liveControl";
 import { beginTargetFlush, finishTargetFlush, forgetWrites, getTargetConfigQueue, waitForTargetWrites } from "../src/config/writeRecord";
 import { getTargetLiveRecord, setTargetLiveRecord } from "../src/config/liveRecord";
 import { useConfig } from "../src/hooks/useConfig";
@@ -75,7 +75,7 @@ const detail = {
   install: {
     path: "/games/Cyberpunk 2077/bin/x64",
     installed: true, filename: "dxgi.dll", managed: true, version: "0.9.4",
-    ini_present: true, directory_generation: "1", log_present: true, directory_generation: "1", candidates: ["dxgi.dll"], extra_proxies: [],
+    ini_present: true, directory_generation: "1", log_present: true, candidates: ["dxgi.dll"], extra_proxies: [],
     runtime_current: true,
     backed_up: [],
     // The library the shipped OptiScaler release actually carries, which is a
@@ -331,6 +331,17 @@ function check(label: string, actual: unknown, expected: unknown) {
   if (!ok) failures += 1;
   console.log(`  ${ok ? "[ok]" : "[FAIL]"} ${label}${ok ? "" : ` — got ${actual}, want ${expected}`}`);
 }
+
+const attachedNotReady = makeLiveStatus(detail.install.path);
+check("an explicit failed state is not reported as waiting for a frame",
+  liveStatusMessage({ ...attachedNotReady, state: "failed", ready: false, error: "attach failed" }).code,
+  "failed");
+check("an explicit searching state stays a runtime check",
+  liveStatusMessage({ ...attachedNotReady, state: "searching", ready: false }).code,
+  "searching");
+check("awaiting OptiScaler config has its own state",
+  liveStatusMessage({ ...attachedNotReady, state: "awaiting_config", ready: false }).code,
+  "awaiting-config");
 
 async function settle(ms = 5) {
   for (let i = 0; i < 8; i++) {
@@ -1107,12 +1118,22 @@ const tile = (host: Element, label: string) => {
   livePanelHost.remove();
 
   console.log("=== live module repair entry follows backend preflight ===");
-  const renderLivePanel = async (status: any, running = false) => {
+  const renderLivePanel = async (
+    status: any,
+    running = false,
+    onBeforeMutation?: () => Promise<void> | void,
+  ) => {
     const node = document.createElement("div");
     document.body.appendChild(node);
     const r = createRoot(node);
     await act(async () => r.render(
-      <LivePanel targetDir={detail.install.path} status={status} running={running} onChanged={() => {}} />
+      <LivePanel
+        targetDir={detail.install.path}
+        status={status}
+        running={running}
+        onBeforeMutation={onBeforeMutation}
+        onChanged={() => {}}
+      />
     ));
     return { node, root: r };
   };
@@ -1121,17 +1142,47 @@ const tile = (host: Element, label: string) => {
       item.textContent?.includes("Add live control") || item.textContent?.includes("Reinstall live control"),
     );
 
+  const previousLiveInstall = fixtures.install_live;
+  const repairOrder: string[] = [];
+  fixtures.install_live = () => {
+    repairOrder.push("install");
+    return { ok: true };
+  };
+
   let repair = await renderLivePanel({
     ...makeLiveStatus(detail.install.path),
     supported: false, can_install: true, asi_installed: false, asi_current: null,
     attached: false, ready: false, state: "absent", schema: null,
-  });
+  }, false, async () => { repairOrder.push("snapshot"); });
   check("a missing ASI on a managed supported target can be added",
     repairButton(repair.node)?.textContent?.trim(), "Add live control");
   check("the missing-ASI action is enabled after preflight",
     repairButton(repair.node)?.getAttribute("data-disabled"), null);
+  await act(async () => { (repairButton(repair.node) as HTMLElement).click(); });
+  await settle();
+  check("live repair snapshots the managed install before writing files",
+    repairOrder.join(","), "snapshot,install");
   await act(async () => repair.root.unmount());
   repair.node.remove();
+
+  repairOrder.length = 0;
+  repair = await renderLivePanel({
+    ...makeLiveStatus(detail.install.path),
+    supported: false, can_install: true, asi_installed: false, asi_current: null,
+    attached: false, ready: false, state: "absent", schema: null,
+  }, false, async () => {
+    repairOrder.push("snapshot");
+    throw new Error("snapshot failed");
+  });
+  await act(async () => { (repairButton(repair.node) as HTMLElement).click(); });
+  await settle();
+  check("a failed snapshot prevents the live file mutation",
+    repairOrder.join(","), "snapshot");
+  check("the snapshot failure is shown on the live panel",
+    repair.node.textContent?.includes("snapshot failed"), true);
+  await act(async () => repair.root.unmount());
+  repair.node.remove();
+  fixtures.install_live = previousLiveInstall;
 
   repair = await renderLivePanel({
     ...makeLiveStatus(detail.install.path),
@@ -1964,6 +2015,52 @@ const tile = (host: Element, label: string) => {
   check("the stale choice does not issue a switch RPC", invocations.filter((call) => call.name === "switch_upscaler").length, switchesBefore);
   await act(async () => apiRoot.unmount());
   apiHost.remove();
+
+  console.log("--- a backend pick made before the first live status is saved ---");
+  const lateTarget = "/games/live-contract/first-status-after-pick";
+  const lateHost = document.createElement("div");
+  document.body.appendChild(lateHost);
+  const lateRoot = createRoot(lateHost);
+  const lateValues = JSON.parse(JSON.stringify(ini));
+  const lateProps = {
+    values: lateValues,
+    gpu: DECK_GPU,
+    live: null as any,
+    targetDir: lateTarget,
+    ffx: detail.install.fsr4.ffx,
+    compact: true,
+    onApply: (changes: any[]) => {
+      const revision = ++getTargetConfigQueue(lateTarget).revision;
+      const record = getTargetLiveRecord(lateTarget);
+      const revisions: Record<string, number> = {};
+      for (const change of changes) {
+        const id = `${change.section}.${change.key}`;
+        record.persistedValues[id] = change.value;
+        record.persistedRevisions[id] = revisions[id] = revision;
+        lateValues[change.section][change.key] = change.value;
+      }
+      setTargetLiveRecord(lateTarget, record);
+      return revisions;
+    },
+  };
+  await act(async () => lateRoot.render(<BasicPanel {...lateProps} />));
+  const lateUpscaler = control(lateHost, "Override upscaler with");
+  await act(async () => {
+    (all(lateUpscaler, '[data-opt-value="xess"]')[0] as HTMLElement).click();
+  });
+  await settle();
+  await act(async () => lateRoot.render(
+    <BasicPanel {...lateProps} live={makeLiveStatus(lateTarget)} />,
+  ));
+  await settle();
+  check("the first ready status recognizes the already-saved active backend",
+    lateHost.textContent?.includes("Saving this backend value before offering a live switch"), false);
+  check("a pick made without live authorization asks for a fresh selection",
+    lateHost.textContent?.includes("choose again when live status is ready"), true);
+  check("a late status does not silently authorize the old selection",
+    all(lateHost, '[data-mock="ButtonItem"]').some((node) => node.textContent?.includes("Switch now")), false);
+  await act(async () => lateRoot.unmount());
+  lateHost.remove();
   detail.gpu = DECK_GPU;
   FFX_VERSIONS.splice(0, FFX_VERSIONS.length, ...DEFAULT_FFX_VERSIONS);
 

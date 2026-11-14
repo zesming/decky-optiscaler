@@ -98,7 +98,7 @@ export const rollbackInstall = callable<
 
 /** Apply the PBZ FSR 4.1 INT8 profile; caller must create a restore point first. */
 export const setupDeckExperiment = callable<
-  [targetDir: string, gamePath: string],
+  [targetDir: string, gamePath: string, name?: string],
   ActionResult & { restart_needed?: boolean }
 >("setup_deck_experiment");
 

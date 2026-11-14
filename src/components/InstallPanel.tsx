@@ -579,7 +579,13 @@ export function InstallPanel({ detail, status, appid, live, running, onBeforeMut
       ) : null}
 
       {detail.install.installed ? (
-        <LivePanel targetDir={detail.install.path} status={live} running={running} onChanged={onChanged} />
+        <LivePanel
+          targetDir={detail.install.path}
+          status={live}
+          running={running}
+          onBeforeMutation={beforeManagedMutation}
+          onChanged={onChanged}
+        />
       ) : null}
 
       {detail.install.installed ? (

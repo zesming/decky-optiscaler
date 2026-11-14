@@ -82,6 +82,7 @@ interface Props {
   onManual: () => void;
   onLogs: () => void;
   onChanged: () => Promise<void> | void;
+  onRemoved?: () => void;
   onReloadPlan: () => Promise<void> | void;
   onResetConfig: () => Promise<void> | void;
   onBeforeMutation?: () => Promise<void> | void;
@@ -436,6 +437,7 @@ export function SetupChecklist({
   onManual,
   onLogs,
   onChanged,
+  onRemoved,
   onReloadPlan,
   onResetConfig,
   onBeforeMutation,
@@ -904,6 +906,7 @@ export function SetupChecklist({
       }
 
       filesRemoved = true;
+      onRemoved?.();
       if (rememberIt) await remember(PREF_REMOVE_LAUNCH, action);
       setRemoveRetry(null);
       setRemoveError(null);

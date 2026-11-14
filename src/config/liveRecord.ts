@@ -20,11 +20,14 @@ export interface TargetLiveRecord {
   /** Last values and target-wide revisions confirmed written to the INI. */
   persistedValues: Record<string, string>;
   persistedRevisions: Record<string, number>;
+  /** Old status replies at or below this epoch cannot restore a cleared receipt. */
+  statusEpoch?: number;
 }
 
 const records = new Map<string, TargetLiveRecord>();
 const listeners = new Map<string, Set<() => void>>();
 const statusRequestEpochs = new Map<string, number>();
+const targetsByAppId = new Map<string, string>();
 
 /** Monotonic per-target request order shared by every mounted live-status hook. */
 export function beginTargetLiveStatusRequest(target: string): number {
@@ -50,6 +53,7 @@ function copy(record: TargetLiveRecord): TargetLiveRecord {
     live: record.live ? { ...record.live } : null,
     persistedValues: { ...record.persistedValues },
     persistedRevisions: { ...record.persistedRevisions },
+    statusEpoch: record.statusEpoch ?? 0,
   };
 }
 
@@ -58,13 +62,15 @@ export function getTargetLiveRecord(target: string): TargetLiveRecord {
   return record ? copy(record) : {
     restartKeys: [], livePending: [], live: null,
     persistedValues: {}, persistedRevisions: {},
+    statusEpoch: 0,
   };
 }
 
 export function setTargetLiveRecord(target: string, record: TargetLiveRecord): void {
   if (
     record.restartKeys.length === 0 && record.livePending.length === 0 && !record.live &&
-    Object.keys(record.persistedValues).length === 0 && Object.keys(record.persistedRevisions).length === 0
+    Object.keys(record.persistedValues).length === 0 && Object.keys(record.persistedRevisions).length === 0 &&
+    !record.statusEpoch
   ) {
     records.delete(target);
   } else {
@@ -81,6 +87,59 @@ export function updateTargetLiveRecord(
   const next = update(getTargetLiveRecord(target));
   setTargetLiveRecord(target, next);
   return getTargetLiveRecord(target);
+}
+
+/** Keep Steam's app identity attached to its currently managed install. */
+export function rememberTargetForAppId(target: string, appid: string): void {
+  if (target && appid && appid !== "0") targetsByAppId.set(appid, target);
+}
+
+function invalidateTargetStatuses(target: string): number {
+  const epoch = Math.max(
+    getTargetLiveStatusRequestEpoch(target),
+    getTargetLiveRecord(target).statusEpoch ?? 0,
+  ) + 1;
+  statusRequestEpochs.set(target, epoch);
+  return epoch;
+}
+
+/** Clear target receipts when Steam confirms a new process start. */
+export function clearTargetAfterSteamRestart(appid: string): void {
+  if (!appid || appid === "0") return;
+  const target = targetsByAppId.get(appid);
+  if (!target) return;
+  const statusEpoch = invalidateTargetStatuses(target);
+  updateTargetLiveRecord(target, (stored) => ({
+    ...stored,
+    restartKeys: [],
+    livePending: [],
+    live: null,
+    statusEpoch,
+  }));
+}
+
+/** A stopped-game file mutation leaves no live receipt or restart warning to reconcile. */
+export function clearTargetLiveActions(target: string): void {
+  updateTargetLiveRecord(target, (stored) => ({
+    ...stored,
+    restartKeys: [],
+    livePending: [],
+    live: null,
+  }));
+}
+
+/** Clear target state after file replacement; Remove can also drop the Steam mapping. */
+export function forgetTargetLiveRecord(target: string, removeAppMapping = false): void {
+  const statusEpoch = invalidateTargetStatuses(target);
+  setTargetLiveRecord(target, {
+    restartKeys: [], livePending: [], live: null,
+    persistedValues: {}, persistedRevisions: {}, statusEpoch,
+  });
+  if (removeAppMapping) {
+    for (const [appid, mappedTarget] of targetsByAppId) {
+      if (mappedTarget === target) targetsByAppId.delete(appid);
+    }
+  }
 }
 
 export function subscribeTargetLiveRecord(target: string, listener: () => void): () => void {

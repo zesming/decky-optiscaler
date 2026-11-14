@@ -11,6 +11,7 @@ interface Props {
   status: LiveStatus | null;
   /** Steam reports the game running even if its live module never attached. */
   running?: boolean;
+  onBeforeMutation?: () => Promise<void> | void;
   onChanged: () => Promise<void> | void;
 }
 
@@ -125,7 +126,7 @@ function Measurements({ status }: Readonly<{ status: LiveStatus }>) {
   );
 }
 
-export function LivePanel({ targetDir, status, running = false, onChanged }: Props) {
+export function LivePanel({ targetDir, status, running = false, onBeforeMutation, onChanged }: Props) {
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -147,9 +148,7 @@ export function LivePanel({ targetDir, status, running = false, onChanged }: Pro
   const gameRunning = running || status.legacy_running === true;
   const body = (
     <Notice tone={liveState.tone} title={liveState.title}>
-      {liveState.ready
-        ? "Schema 6 runtime identity and frame hook are verified. Each live action still requires its own explicit capability."
-        : liveState.detail}
+      {liveState.detail}
     </Notice>
   );
 
@@ -195,6 +194,7 @@ export function LivePanel({ targetDir, status, running = false, onChanged }: Pro
               setError(null);
               setRestartNeeded(false);
               try {
+                await onBeforeMutation?.();
                 const result = await installLive(targetDir);
                 if (!result.ok) {
                   setError(result.error ?? "Could not install live control.");

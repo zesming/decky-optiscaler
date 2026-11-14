@@ -302,7 +302,7 @@ function withoutPluginClause(value: string, filename: string): { value: string; 
 }
 
 function isWineAssignmentToken(token: ShellToken): boolean {
-  return /^WINEDLLOVERRIDES=/i.test(token.raw);
+  return /^WINEDLLOVERRIDES=/.test(token.raw);
 }
 
 function effectiveWineAssignment(tokens: ShellToken[]): ShellToken | undefined {

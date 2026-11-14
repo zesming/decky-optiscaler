@@ -48,6 +48,18 @@ check("native assignment reaches the game with both clauses",
 check("only ordered n,b is recognized as the plugin clause",
   hasOverride(native, "dxgi.dll") &&
     !hasOverride('WINEDLLOVERRIDES="dxgi=b,n" %command%', "dxgi.dll"));
+check("DLL stems remain case-insensitive",
+  hasOverride('WINEDLLOVERRIDES="DXGI=n,b" %command%', "dxgi.dll"));
+
+const lowercaseVariable = mergeWineOverrides(
+  "winedlloverrides=foo=n,b %command%",
+  ["dxgi"],
+);
+assert.ok(lowercaseVariable);
+check("a lowercase lookalike stays independent from WINEDLLOVERRIDES",
+  lowercaseVariable.includes('winedlloverrides=foo=n,b WINEDLLOVERRIDES="dxgi=n,b" %command%') &&
+    effectiveWineValue(lowercaseVariable) === "dxgi=n,b" &&
+    !hasOverride('winedlloverrides="dxgi=n,b" %command%', "dxgi.dll"));
 
 const envWrapped = mergeWineOverrides(
   "env WINEDLLOVERRIDES=foo=n,b lsfg-run %command%",

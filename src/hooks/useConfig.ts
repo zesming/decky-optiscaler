@@ -1,8 +1,9 @@
 import { preserveExistingInstall } from "../launchOptions";
 import {
+  clearTargetLiveActions,
   getTargetLiveStatusRequestEpoch,
   getTargetLiveRecord,
-  setTargetLiveRecord,
+  rememberTargetForAppId,
   subscribeTargetLiveRecord,
   updateTargetLiveRecord,
 } from "../config/liveRecord";
@@ -169,6 +170,10 @@ export function useConfig(
     },
     [],
   );
+
+  useEffect(() => {
+    if (targetDir && gameContext?.appid) rememberTargetForAppId(targetDir, gameContext.appid);
+  }, [targetDir, gameContext?.appid]);
 
   useEffect(() => {
     if (!targetDir) return;
@@ -517,12 +522,15 @@ export function useConfig(
 
   const reconcileLiveStatus = useCallback((status: LiveStatus | null, statusEpoch: number | null) => {
     if (!targetDir || !enabled || !status || statusEpoch === null) return;
+    const dir = targetDir;
+    const existing = getTargetLiveRecord(dir);
+    // A Steam start event advances this target's epoch. Replies started before
+    // that event cannot restore the receipts it cleared.
+    if (statusEpoch <= (existing.statusEpoch ?? 0)) return;
     if (status.schema === 7 && status.supported && status.dir_matches && status.dir_verified && status.dir) {
       canonicalTarget.current = status.dir;
     }
-    const dir = targetDir;
     const queue = getQueue(dir);
-    const existing = getTargetLiveRecord(dir);
     if (existing.livePending.length === 0 &&
         !(existing.live && receiptAuthorizationChanged(existing.live, status))) return;
     const nextRecord = updateTargetLiveRecord(dir, (stored) => {
@@ -747,18 +755,6 @@ export function useConfig(
     await readTarget(targetDir, identity, generationAtRender, true);
   }, [targetDir, enabled, identity, generationAtRender, flushTarget, isCurrent, readTarget]);
 
-  const forgetLocal = useCallback(async () => {
-    if (!targetDir) return;
-    await flushTarget(targetDir, identity, generationAtRender, true);
-    await waitForTargetWrites(targetDir);
-    if (!isCurrent(identity, generationAtRender)) return;
-    forgetWrites(targetDir);
-    const queue = getQueue(targetDir);
-    queue.pending.clear();
-    if (queue.timer !== null) window.clearTimeout(queue.timer);
-    queue.timer = null;
-  }, [targetDir, identity, generationAtRender, flushTarget, isCurrent, getQueue]);
-
   const queueChanges = useCallback(
     (changes: OptionChange[], immediate = false) => {
       if (!targetDir || changes.length === 0 || !enabled) return;
@@ -839,21 +835,12 @@ export function useConfig(
       if (!result.ok) throw new Error(result.error ?? "Could not enable FSR 4.1.1b");
       forgetWrites(targetDir);
       await readTarget(targetDir, identity, generationAtRender, true);
-      const updatedRecord = updateTargetLiveRecord(targetDir, (stored) => ({
-        ...stored,
-        // Switching the local FSR build is a restart-only operation. Do not
-        // leave a result from a prior live command at the top of the page,
-        // where a session change could make this setup action look like an
-        // unconfirmed command from the game.
-        live: null,
-        restartKeys: stored.restartKeys.includes("__fsr4_build__")
-          ? stored.restartKeys
-          : [...stored.restartKeys, "__fsr4_build__"],
-      }));
+      clearTargetLiveActions(targetDir);
+      const updatedRecord = getTargetLiveRecord(targetDir);
       updateView(identity, (current) => ({
         ...current,
         ...updatedRecord,
-        dirty: true,
+        dirty: false,
       }));
     } finally {
       updateView(identity, (current) => ({ ...current, saving: false }));
@@ -936,14 +923,6 @@ export function useConfig(
       dirty: true,
     }));
   }, [identity, updateView, targetDir]);
-  const clearLive = useCallback(() => {
-    if (targetDir) {
-      const stored = getTargetLiveRecord(targetDir);
-      setTargetLiveRecord(targetDir, { ...stored, live: null });
-    }
-    updateView(identity, (current) => ({ ...current, live: null }));
-  }, [identity, updateView, targetDir]);
-
   return {
     values: view.values,
     fsr4Build: view.fsr4Build,
@@ -964,9 +943,7 @@ export function useConfig(
     reconcileLiveStatus,
     recordLiveAction,
     authoritativeReload,
-    forgetLocal,
     clearDirty,
     markDirty,
-    clearLive,
   };
 }

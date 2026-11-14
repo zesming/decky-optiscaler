@@ -14,7 +14,7 @@ const API_BACKEND_KEY: Record<LiveApi, string> = {
 
 const UNREADY_STATES = new Set([
   "absent", "disconnected", "failed", "legacy", "loaded", "loading", "searching",
-  "unknown", "unsupported", "waiting", "awaiting_frame", "queued", "timeout",
+  "unknown", "unsupported", "waiting", "awaiting_config", "awaiting_frame", "queued", "timeout",
 ]);
 
 export function backendOptionId(api: LiveApi): string {
@@ -293,22 +293,6 @@ export function isConfirmedLiveResult(
   return true;
 }
 
-export function liveResultIsFullyApplied(
-  result: LiveApplyResult | null | undefined,
-  changes: OptionChange[],
-): boolean {
-  if (
-    !result ||
-    !isConfirmedLiveResult(result) ||
-    (result.deferred?.length ?? 0) > 0 ||
-    (result.failed_keys?.length ?? 0) > 0
-  ) {
-    return false;
-  }
-  const applied = new Set(confirmedLiveKeys(result));
-  return changes.length > 0 && changes.every((change) => applied.has(`${change.section}.${change.key}`));
-}
-
 export function liveResultIsComplete(result: LiveApplyResult | null | undefined): boolean {
   return Boolean(
     isConfirmedLiveResult(result) &&
@@ -319,7 +303,7 @@ export function liveResultIsComplete(result: LiveApplyResult | null | undefined)
 }
 
 export interface LiveStatusMessage {
-  code: "unknown" | "unsupported" | "old" | "wrongdir" | "not-installed" | "load-disabled" | "not-loaded" | "searching" | "awaiting-frame" | "disconnected" | "ready" | "queued" | "rejected" | "timeout" | "failed";
+  code: "unknown" | "unsupported" | "old" | "wrongdir" | "not-installed" | "load-disabled" | "not-loaded" | "searching" | "awaiting-config" | "awaiting-frame" | "disconnected" | "ready" | "queued" | "rejected" | "timeout" | "failed";
   title: string;
   detail: string;
   tone: "info" | "warn" | "error" | "success";
@@ -436,30 +420,48 @@ export function liveStatusMessage(status: LiveStatus | null | undefined): LiveSt
       ready: false,
     };
   }
-  if (status.state === "awaiting_frame" || (status.attached && status.ready !== true)) {
+  if (status.state === "failed") {
+    return {
+      code: "failed",
+      title: "Live control could not attach",
+      detail: status.error ?? status.reason ?? "The running runtime could not be verified.",
+      tone: "error",
+      ready: false,
+    };
+  }
+  if (status.state === "awaiting_config") {
+    return {
+      code: "awaiting-config",
+      title: "Live control is waiting for OptiScaler",
+      detail: status.reason ?? "OptiScaler has not authorized its active configuration yet.",
+      tone: "info",
+      ready: false,
+    };
+  }
+  if (["searching", "loading", "loaded", "waiting", "attached"].includes(status.state)) {
+    return {
+      code: "searching",
+      title: "Live control is checking the running game",
+      detail: status.reason ?? "It will become ready only after the runtime and frame hook are verified.",
+      tone: "info",
+      ready: false,
+    };
+  }
+  if (status.state === "awaiting_frame") {
+    return {
+      code: "awaiting-frame",
+      title: "Live control is waiting for a frame",
+      detail: status.reason ?? "The game has loaded the module, but has not reached a verified frame yet.",
+      tone: "info",
+      ready: false,
+    };
+  }
+  if (status.attached && status.ready !== true) {
     return {
       code: "awaiting-frame",
       title: "Live control is waiting for a frame",
       detail: "The game has loaded the module, but has not reached a verified frame yet.",
       tone: "info",
-      ready: false,
-    };
-  }
-  if (["searching", "loading", "loaded", "waiting"].includes(status.state)) {
-    return {
-      code: "searching",
-      title: "Live control is checking the running game",
-      detail: "It will become ready only after the runtime and frame hook are verified.",
-      tone: "info",
-      ready: false,
-    };
-  }
-  if (status.state === "failed") {
-    return {
-      code: "failed",
-      title: "Live control could not attach",
-      detail: status.error ?? "The running runtime could not be verified.",
-      tone: "error",
       ready: false,
     };
   }

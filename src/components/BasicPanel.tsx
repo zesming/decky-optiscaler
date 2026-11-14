@@ -243,6 +243,12 @@ function backendCode(preset: Preset | undefined, api?: LiveStatus["active_api"])
   return value && value !== "auto" ? value : null;
 }
 
+function backendKeyForApi(api: LiveStatus["active_api"]): string | null {
+  return api === "dx11" ? "Dx11Upscaler"
+    : api === "dx12" ? "Dx12Upscaler"
+      : api === "vulkan" ? "VulkanUpscaler" : null;
+}
+
 export function BasicPanel({
   values,
   disabled,
@@ -280,9 +286,8 @@ export function BasicPanel({
     context: LiveContext | null;
     baselineSeq: string | null;
     token: number;
-    key: string | null;
-    expectedValue: string | null;
-    persistedRevision: number | null;
+    persistedValues: Record<string, string>;
+    persistedRevisions: Record<string, number>;
     saveFailed: boolean;
   } | null>(null);
   const pickedBindingRef = useRef<typeof pickedBinding>(null);
@@ -315,16 +320,16 @@ export function BasicPanel({
   const rememberPickedBackend = (
     presetId: string,
     context: LiveContext | null,
-    key: string | null,
-    expectedValue: string | null,
+    backendChanges: OptionChange[],
   ) => {
     const binding = {
       context,
       baselineSeq: liveResult?.seq ?? live?.seq ?? null,
       token: ++selectionToken.current,
-      key,
-      expectedValue,
-      persistedRevision: null,
+      persistedValues: Object.fromEntries(backendChanges.map((change) => [
+        `${change.section}.${change.key}`, change.value,
+      ])),
+      persistedRevisions: {},
       saveFailed: false,
     };
     pickedBindingRef.current = binding;
@@ -512,18 +517,27 @@ export function BasicPanel({
   const pickedContextCurrent = Boolean(
     pickedContext && currentSelectionContext && isSameLiveContext(pickedContext, reportedLive, bindingTarget),
   );
-  const pickedBackendId = pickedBinding?.key ? `Upscalers.${pickedBinding.key}` : null;
+  const pickedBackendKey = backendKeyForApi(
+    pickedBinding?.context?.active_api ?? reportedLive?.active_api,
+  );
+  const pickedBackendId = pickedBackendKey ? `Upscalers.${pickedBackendKey}` : null;
+  const pickedBackendValue = pickedBackendId
+    ? pickedBinding?.persistedValues[pickedBackendId] ?? null
+    : null;
+  const pickedBackendRevision = pickedBackendId
+    ? pickedBinding?.persistedRevisions[pickedBackendId] ?? null
+    : null;
   const pickedRecord = targetDir && pickedBackendId ? getTargetLiveRecord(targetDir) : null;
   const pickedQueueItem = targetDir && pickedBackendId
     ? (getTargetConfigQueue(targetDir).pending.get(pickedBackendId) ??
       getTargetConfigQueue(targetDir).inFlight.get(pickedBackendId))
     : undefined;
   const pickedConfigPersisted = Boolean(
-    pickedBackendId && pickedBinding?.persistedRevision !== null && pickedBinding?.persistedRevision !== undefined &&
-      pickedBinding.expectedValue !== null &&
-      pickedRecord?.persistedRevisions[pickedBackendId] === pickedBinding.persistedRevision &&
-      pickedRecord.persistedValues[pickedBackendId] === pickedBinding.expectedValue &&
-      (!pickedQueueItem || pickedQueueItem.revision <= pickedBinding.persistedRevision),
+    pickedBackendId && pickedBackendRevision !== null && pickedBackendRevision !== undefined &&
+      pickedBackendValue !== null &&
+      pickedRecord?.persistedRevisions[pickedBackendId] === pickedBackendRevision &&
+      pickedRecord.persistedValues[pickedBackendId] === pickedBackendValue &&
+      (!pickedQueueItem || pickedQueueItem.revision <= pickedBackendRevision),
   );
   const switchSelectionStale = Boolean(pickedContext && !isSameLiveContext(pickedContext, reportedLive, bindingTarget));
   const switchSelectionNeedsRefresh = Boolean(picked && pickedContext && switchSelectionStale);
@@ -563,7 +577,6 @@ export function BasicPanel({
     !switchSelectionStale &&
     !switching &&
     !(switchOutcome?.sent && (switchOutcome.ack === "pending" || switchOutcome.ack === "timeout")) &&
-    !pickedConfigPersisted &&
     !canSwitchNow;
   useEffect(() => {
     if (!switchAccepted) return;
@@ -574,22 +587,25 @@ export function BasicPanel({
 
   const applyUpscalerNow = async () => {
     const selection = pickedBindingRef.current;
+    const selectedBackendKey = selection?.context
+      ? backendKeyForApi(selection.context.active_api)
+      : null;
+    const selectedId = selectedBackendKey ? `Upscalers.${selectedBackendKey}` : null;
+    const expectedValue = selectedId ? selection?.persistedValues[selectedId] : null;
+    const selectedRevision = selectedId ? selection?.persistedRevisions[selectedId] : null;
     if (
       !targetDir || !wanted || !selection?.context || selection.context.active_api === "unknown" ||
-      !selection.key || selection.expectedValue === null || selection.persistedRevision === null
+      !selectedId || expectedValue === null || expectedValue === undefined || selectedRevision == null
     ) {
       setSwitchError("This choice is saved, but live control was not ready when you selected it. Refresh status and choose again.");
       return;
     }
-    const expectedValue = selection.expectedValue;
-    const selectedRevision = selection.persistedRevision;
     const persisted = () => {
-      const id = `Upscalers.${selection.key}`;
       const record = getTargetLiveRecord(targetDir);
       const queue = getTargetConfigQueue(targetDir);
-      const queued = queue.pending.get(id) ?? queue.inFlight.get(id);
-      return record.persistedRevisions[id] === selectedRevision &&
-        record.persistedValues[id] === expectedValue &&
+      const queued = queue.pending.get(selectedId) ?? queue.inFlight.get(selectedId);
+      return record.persistedRevisions[selectedId] === selectedRevision &&
+        record.persistedValues[selectedId] === expectedValue &&
         (!queued || queued.revision <= selectedRevision);
     };
     if (!persisted()) {
@@ -628,13 +644,12 @@ export function BasicPanel({
         // owns the component-local selection. The token protects only the UI;
         // the older request still needs its own sequence and revision record.
         if (liveResult.sent === true && targetDir) {
-          const key = `Upscalers.${selection.key}`;
           onLiveResult?.(
             liveResult,
             selection.context,
-            [key],
-            { [key]: expectedValue },
-            { [key]: selectedRevision },
+            [selectedId],
+            { [selectedId]: expectedValue },
+            { [selectedId]: selectedRevision },
           );
         }
       }
@@ -978,13 +993,10 @@ export function BasicPanel({
                 return;
               }
               const selectedApi = reportedLive?.active_api;
-              const activeKey = selectedApi === "dx11"
-                ? "Dx11Upscaler"
-                : selectedApi === "vulkan"
-                  ? "VulkanUpscaler"
-                  : selectedApi === "dx12"
-                    ? "Dx12Upscaler"
-                    : null;
+              const activeKey = backendKeyForApi(selectedApi);
+              const backendChanges = preset.changes.filter(
+                (change) => change.section === "Upscalers",
+              );
               const selectedChange = activeKey
                 ? preset.changes.find(
                     (change) => change.section === "Upscalers" && change.key === activeKey,
@@ -996,8 +1008,7 @@ export function BasicPanel({
               const binding = rememberPickedBackend(
                 preset.id,
                 selectionContext,
-                activeKey,
-                selectedChange?.value ?? null,
+                backendChanges,
               );
               setSwitchError(null);
               void Promise.resolve()
@@ -1006,7 +1017,7 @@ export function BasicPanel({
                   return result ?? null;
                 })
                 .then(async (revisions) => {
-                  if (!targetDir || !activeKey || !selectedChange) return;
+                  if (!targetDir) return;
                   if (!revisions) {
                     if (pickedBindingRef.current?.token === binding.token) {
                       const failedBinding = { ...binding, saveFailed: true };
@@ -1017,15 +1028,28 @@ export function BasicPanel({
                     return;
                   }
                   await onFlush?.();
-                  const id = `Upscalers.${activeKey}`;
-                  const selectedRevision = revisions[id];
                   const record = getTargetLiveRecord(targetDir);
                   const queue = getTargetConfigQueue(targetDir);
-                  const queued = queue.pending.get(id) ?? queue.inFlight.get(id);
-                  const stillPersisted = selectedRevision !== undefined &&
-                    record.persistedRevisions[id] === selectedRevision &&
-                    record.persistedValues[id] === selectedChange.value &&
-                    (!queued || queued.revision <= selectedRevision);
+                  const persistedValues: Record<string, string> = {};
+                  const persistedRevisions: Record<string, number> = {};
+                  for (const change of backendChanges) {
+                    const id = `${change.section}.${change.key}`;
+                    const revision = revisions[id];
+                    const queued = queue.pending.get(id) ?? queue.inFlight.get(id);
+                    if (
+                      revision !== undefined && record.persistedRevisions[id] === revision &&
+                      record.persistedValues[id] === change.value &&
+                      (!queued || queued.revision <= revision)
+                    ) {
+                      persistedValues[id] = change.value;
+                      persistedRevisions[id] = revision;
+                    }
+                  }
+                  const selectedId = activeKey ? `Upscalers.${activeKey}` : null;
+                  const selectedRevision = selectedId ? persistedRevisions[selectedId] : null;
+                  const stillPersisted = selectedId
+                    ? selectedRevision !== undefined
+                    : Object.keys(persistedRevisions).length > 0;
                   if (pickedBindingRef.current?.token !== binding.token) return;
                   if (!stillPersisted) {
                     const failedBinding = { ...binding, saveFailed: true };
@@ -1034,7 +1058,11 @@ export function BasicPanel({
                     setSwitchError("A newer backend choice replaced this one before it was saved. Choose the backend again before switching.");
                     return;
                   }
-                  const persistedBinding = { ...binding, persistedRevision: selectedRevision };
+                  const persistedBinding = {
+                    ...binding,
+                    persistedValues,
+                    persistedRevisions,
+                  };
                   pickedBindingRef.current = persistedBinding;
                   setPickedBinding(persistedBinding);
                 })
@@ -1151,7 +1179,7 @@ export function BasicPanel({
                 : pickedBinding?.saveFailed
                   ? "The selected backend value was not saved, so the live switch is unavailable. Choose it again after fixing the INI write."
                   : !pickedConfigPersisted
-                    ? pickedBinding?.persistedRevision !== null && pickedBinding?.persistedRevision !== undefined
+                    ? pickedBackendRevision !== null && pickedBackendRevision !== undefined
                       ? "The backend value changed. Choose it again before switching."
                       : "Saving this backend value before offering a live switch."
                 : !pickedBinding?.context

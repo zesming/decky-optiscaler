@@ -4,6 +4,13 @@ import { createRoot, type Root } from "react-dom/client";
 import assert from "node:assert/strict";
 import { fixtures, invocations } from "@decky/api";
 import { useConfig } from "../src/hooks/useConfig";
+import {
+  beginTargetLiveStatusRequest,
+  clearTargetAfterSteamRestart,
+  getTargetLiveRecord,
+  rememberTargetForAppId,
+  setTargetLiveRecord,
+} from "../src/config/liveRecord";
 import { getTargetConfigQueue } from "../src/config/writeRecord";
 import type { ConfigResult, ConfigValues, OptionMeta, WriteConfigResult } from "../src/types";
 
@@ -250,9 +257,58 @@ async function run() {
   assert.equal(reopened.hook.values.FrameGen?.Enabled, "true", "reopening must not resurrect a failed optimistic value");
   await reopened.unmount();
 
+  const sessionTarget = `${targetPrefix}/verified-session-change`;
+  setTargetLiveRecord(sessionTarget, {
+    restartKeys: ["FrameGen.Enabled"],
+    livePending: [{
+      target: sessionTarget, session: "session-a", seq: "7", statusEpoch: 9,
+      keys: ["FrameGen.Enabled"], values: { "FrameGen.Enabled": "true" },
+      revisions: { "FrameGen.Enabled": 3 },
+      contexts: { "FrameGen.Enabled": {
+        target: sessionTarget, session: "session-a", active_api: "dx12", capability_generation: "gen-a",
+      } },
+    }],
+    live: {
+      sent: true, confirmed: false, ack: "pending", session: "session-a", seq: "7",
+      sent_keys: ["FrameGen.Enabled"],
+    },
+    persistedValues: { "FrameGen.Enabled": "true" },
+    persistedRevisions: { "FrameGen.Enabled": 3 },
+    statusEpoch: 0,
+  });
+  readBackend = (dir) => readResult(dir);
+  const sessionProbe = await ready("session-a-probe", sessionTarget);
+  const oldPollEpoch = beginTargetLiveStatusRequest(sessionTarget);
+  const nextPollEpoch = beginTargetLiveStatusRequest(sessionTarget);
+  const liveStatus = (session: string, state = "ready") => ({
+    asi_installed: true, supported: true, schema: 7, ready: state === "ready",
+    attached: true, asi_current: true, dir_matches: true, dir_verified: true,
+    state, session, capability_generation: `gen-${session}`,
+    active_api: "dx12", seq: "7", ack: "pending", accepted_keys: [], failed_keys: [],
+  }) as any;
+  await act(async () => sessionProbe.hook.reconcileLiveStatus(liveStatus("session-b"), nextPollEpoch));
+  assert.equal(getTargetLiveRecord(sessionTarget).restartKeys.includes("FrameGen.Enabled"), true,
+    "a different status session alone does not clear restart state");
+  assert.equal(getTargetLiveRecord(sessionTarget).live?.session, "session-a",
+    "the prior receipt remains until Steam reports a start");
+  rememberTargetForAppId(sessionTarget, "4242");
+  await act(async () => clearTargetAfterSteamRestart("4242"));
+  const afterSteamStart = getTargetLiveRecord(sessionTarget);
+  assert.deepEqual(afterSteamStart.restartKeys, [], "Steam start clears restart keys");
+  assert.equal(afterSteamStart.livePending.length, 0, "Steam start clears pending requests");
+  assert.equal(afterSteamStart.live, null, "Steam start clears the old receipt");
+  await act(async () => sessionProbe.hook.reconcileLiveStatus(liveStatus("session-a"), oldPollEpoch));
+  assert.equal(getTargetLiveRecord(sessionTarget).live, null, "a pre-start status reply cannot restore a cleared receipt");
+  await sessionProbe.unmount();
+
   const dir8 = `${targetPrefix}/fsr4-preserve`;
   disk.set(dir8, freshValues());
   builds.set(dir8, "bundled");
+  setTargetLiveRecord(dir8, {
+    restartKeys: ["FrameGen.Enabled"], livePending: [],
+    live: { sent: true, confirmed: false, ack: "pending", session: "old-session", seq: "1" },
+    persistedValues: {}, persistedRevisions: {},
+  });
   readBackend = (dir) => readResult(dir);
   const previousSteam = (globalThis as any).SteamClient;
   const launchOptions = 'gamescope --mangoapp %command% WINEDLLOVERRIDES="custom=n,b"';
@@ -269,6 +325,8 @@ async function run() {
     const buildCall = calls.find((call) => call.name === "set_fsr4_build");
     assert.ok(snapshot && buildCall && calls.indexOf(snapshot) < calls.indexOf(buildCall), "Basic FSR4 must snapshot before replacing files");
     assert.equal(snapshot.args[2], launchOptions, "the snapshot must receive Steam's current launch string");
+    assert.deepEqual(getTargetLiveRecord(dir8).restartKeys, [], "a stopped-game FSR change leaves no restart warning");
+    assert.equal(getTargetLiveRecord(dir8).live, null, "a stopped-game FSR change clears its old live receipt");
     await fsr4.unmount();
   } finally {
     (globalThis as any).SteamClient = previousSteam;
