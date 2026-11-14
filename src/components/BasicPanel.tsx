@@ -1225,12 +1225,10 @@ export function BasicPanel({
             </Notice>
           </PanelSectionRow>
         ) : null}
-        {int8Selected ? (
+        {int8Selected && fsr4Build !== "4.1.1b" ? (
           <PanelSectionRow>
-            <Notice tone="info" title={fsr4Build === "4.1.1b" ? "FSR 4.1.1b ready for the next launch" : "Manual INT8 settings"}>
-              {fsr4Build === "4.1.1b"
-                ? "Experimental RDNA2 upscaling. Check for FSR4-I8 in the game's watermark. Frame generation is configured separately."
-                : "Select FSR 4.1.1b — Steam Deck to install the RDNA2 ghosting fix."}
+            <Notice tone="info" title="Manual INT8 settings">
+              Select FSR 4.1.1b — Steam Deck to install the RDNA2 ghosting fix.
             </Notice>
           </PanelSectionRow>
         ) : needsInt8 || ffxUpsNeedsInt8 ? (
@@ -1253,7 +1251,7 @@ export function BasicPanel({
       {/* Last, and only in the Quick Access panel: everything above it takes
           effect in the running game, and this does not. */}
       {compact ? (
-        <PanelSection title="Needs a restart">{methodControls}</PanelSection>
+        <PanelSection title="Startup settings">{methodControls}</PanelSection>
       ) : null}
     </>
   );

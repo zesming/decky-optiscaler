@@ -678,7 +678,7 @@ const tile = (host: Element, label: string) => {
   check("restart-only INT8 setup clears a stale live-session outcome",
     host5.textContent?.includes("previous game session"), false);
   check("setup leaves frame generation alone", JSON.stringify(ini.FrameGen), fgBeforeSetup);
-  check("setup says next launch", host5.textContent!.includes("ready for the next launch"), true);
+  check("an installed INT8 build does not keep a next-launch notice", host5.textContent!.includes("ready for the next launch"), false);
 
   await act(async () => root5.unmount());
   liveSession = previousLiveSession;

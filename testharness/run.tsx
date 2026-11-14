@@ -439,7 +439,7 @@ async function render(name: string, element: React.ReactElement) {
       order("Method") > order("Override upscaler with") &&
       order("Method") > order("FFX FG version")}`);
     console.log(`  and says so as a heading: ${
-      qp.host.textContent!.includes("Needs a restart")}`);
+      qp.host.textContent!.includes("Startup settings")}`);
   }
 
   const gamesTab = findAll(qp.host, '[data-tab="games"]')[0] as HTMLElement;
@@ -653,7 +653,7 @@ async function render(name: string, element: React.ReactElement) {
     // method stays where it belongs, with the rest of frame generation.
     console.log(`  the full page keeps the FG method in its own section: ${
       order("Method") < order("Override upscaler with") &&
-      !gd.host.textContent!.includes("Needs a restart")}`);
+      !gd.host.textContent!.includes("Startup settings")}`);
   }
   console.log(`  basic 2X/3X/4X multiplier is a dropdown: ${gd.host.textContent!.includes("2X") && gd.host.textContent!.includes("4X")}`);
   console.log(`  FSR4 reported from bundled SDK: ${gd.host.textContent!.includes("4.1.1.2740")}`);
