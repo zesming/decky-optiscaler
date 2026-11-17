@@ -22,6 +22,7 @@ from pathlib import Path
 from .constants import (
     COMPAT_CACHE_TTL,
     COMPAT_LIST_PAGE,
+    COMPAT_LIST_MIRRORS,
     DEFAULT_PROXY,
     PROXY_FILENAMES,
     WIKI_HTML_BASE,
@@ -34,6 +35,9 @@ USER_AGENT = "decky-optiscaler/0.1 (+https://github.com/SteamDeckHomebrew)"
 # that a wiki which is simply unreachable is asked once rather than on every
 # question, short enough that coming back onto a network is noticed.
 PAGE_RETRY_AFTER = 300
+
+# Three sources, each with an IPv4 retry, normally fit the UI's 20s watch.
+COMPAT_FETCH_TIMEOUT = 3
 
 NOISE_WORDS = {
     "the", "a", "an", "of", "and",
@@ -193,13 +197,28 @@ class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(_IPv4HTTPSConnection, request, context=self._context)
 
 
-def _open(request, timeout, context, binary=False):
+class _HTTPSOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme.lower() != "https":
+            raise urllib.error.URLError("mirror redirect requires HTTPS")
+        return super().redirect_request(request, fp, code, msg, headers, newurl)
+
+
+def _open(request, timeout, context, binary=False, require_https=False, raw_markdown=False):
+    handlers = []
+    if require_https:
+        handlers.append(_HTTPSOnlyRedirectHandler())
     if _force_ipv4.get():
-        opener = urllib.request.build_opener(_IPv4HTTPHandler(), _IPv4HTTPSHandler(context=context))
-        response = opener.open(request, timeout=timeout)
+        handlers.extend((_IPv4HTTPHandler(), _IPv4HTTPSHandler(context=context)))
+    elif require_https:
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    if handlers:
+        response = urllib.request.build_opener(*handlers).open(request, timeout=timeout)
     else:
         response = urllib.request.urlopen(request, timeout=timeout, context=context)
     with response:
+        if raw_markdown and response.headers.get_content_type() in ("text/html", "application/xhtml+xml"):
+            raise ValueError("compatibility list returned HTML instead of raw Markdown")
         body = response.read()
     return body if binary else body.decode("utf-8", errors="replace")
 
@@ -215,13 +234,20 @@ def _is_retryable(exc):
     return isinstance(exc, (ConnectionError, OSError))
 
 
-def _http_get(url, timeout=12, binary=False):
+def _http_get(url, timeout=12, binary=False, allow_unverified=True, raw_markdown=False):
     global _ssl_context, _ssl_context_kind
 
     # Wiki page names contain characters such as U+2010 HYPHEN, which urllib
     # cannot put on the request line unencoded.
     url = urllib.parse.quote(url, safe=":/?#[]@!$&'()*+,;=%~")
+    if not allow_unverified and urllib.parse.urlsplit(url).scheme.lower() != "https":
+        raise ValueError("mirror request requires HTTPS")
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    policy = {}
+    if not allow_unverified:
+        policy["require_https"] = True
+    if raw_markdown:
+        policy["raw_markdown"] = True
 
     def attempt(context):
         """One fetch, retried once over IPv4 when the network stalls.
@@ -232,16 +258,20 @@ def _http_get(url, timeout=12, binary=False):
         and only one of them is worth a second try.
         """
         try:
-            return _open(request, timeout, context, binary)
+            return _open(request, timeout, context, binary, **policy)
         except Exception as exc:
             if _is_tls_error(exc) or not _is_retryable(exc):
                 raise
             with _ipv4_only():
-                return _open(request, timeout, context, binary)
+                return _open(request, timeout, context, binary, **policy)
 
-    if _ssl_context is not None:
+    # Keep the selected object local: detail-page requests run concurrently and
+    # may replace the shared cache with the legacy unverified origin context.
+    cached_context = _ssl_context
+    if cached_context is not None and (allow_unverified or (
+            cached_context.verify_mode == ssl.CERT_REQUIRED and cached_context.check_hostname)):
         try:
-            return attempt(_ssl_context)
+            return attempt(cached_context)
         except Exception as exc:
             if not _is_tls_error(exc):
                 raise
@@ -251,6 +281,8 @@ def _http_get(url, timeout=12, binary=False):
 
     last_error = None
     for kind, context in _candidate_contexts():
+        if not allow_unverified and (context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname):
+            continue
         try:
             body = attempt(context)
         except Exception as exc:
@@ -590,14 +622,26 @@ class WikiClient:
         is the only way this could make things worse than not refreshing.
         """
         self.last_attempt = time.time()
-        try:
-            markdown = _http_get(f"{WIKI_RAW_BASE}/{COMPAT_LIST_PAGE}")
-            entries = parse_compat_list(markdown)
-        except Exception as exc:  # network, TLS, disk, decoding — all non-fatal
-            self.last_error = f"{type(exc).__name__}: {exc}"
-            return {"ok": False, "changed": False, "count": 0, "error": self.last_error}
-        if not entries:
-            self.last_error = "compatibility list downloaded but parsed to zero rows"
+        origin = f"{WIKI_RAW_BASE}/{COMPAT_LIST_PAGE}"
+        failures = []
+        # Mirrors are scoped to this public list. Binary downloads and detail
+        # pages keep their existing source/transport policies.
+        for prefix in ("", *COMPAT_LIST_MIRRORS):
+            url = prefix + origin.removeprefix("https://") if prefix else origin
+            try:
+                markdown = _http_get(url, timeout=COMPAT_FETCH_TIMEOUT,
+                                     allow_unverified=not bool(prefix), raw_markdown=True)
+                if re.search(r"<(?:html|!doctype\s+html)\b", markdown, re.IGNORECASE):
+                    raise ValueError("compatibility list returned HTML instead of raw Markdown")
+                entries = parse_compat_list(markdown)
+                if not entries:
+                    raise ValueError("compatibility list downloaded but parsed to zero rows")
+            except Exception as exc:
+                failures.append(f"{url}: {type(exc).__name__}: {exc}")
+                continue
+            break
+        else:
+            self.last_error = "; ".join(failures)
             return {"ok": False, "changed": False, "count": 0, "error": self.last_error}
 
         after = fingerprint(entries)

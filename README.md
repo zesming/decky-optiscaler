@@ -20,6 +20,12 @@ Install the generated zip through Decky Developer mode's **Install Plugin from U
 
 Close the game before installation, upgrade, binary changes, rollback or removal. Existing managed installs receive an immutable restore point before an upgrade. If a restore point already exists, it is reused: rollback returns to its recorded version and configuration, which can predate the immediately previous upgrade. A running game is deferred until it closes. **Restore previous install** restores that state, including the captured launch options and related per-game preferences; automatic upgrading stays paused for that restored install until the bundled core changes or you upgrade manually. **Remove** restores the earliest original game files and offers the original launch options. Use the restore choice for full removal. Failed Steam writes remain visible and retryable. Originals lost before this build cannot be recreated.
 
+## Compatibility-list updates
+
+The game compatibility list tries the official GitHub Wiki first. If it fails or returns an invalid list, this fork automatically tries [github.chenc.dev](https://github.chenc.dev/) and then [xsadwsd.kdns.fr](https://xsadwsd.kdns.fr/), using HTTPS certificate verification and rejecting insecure redirects for these third-party proxies. Each source uses a three-second socket timeout with the existing IPv4 retry. Their availability and freshness depend on the service and your network.
+
+A response must be raw Markdown with a nonempty compatibility table before it replaces the cache. If every source fails, the last cached or bundled list stays available. These mirrors apply only to game-list refreshes; they do not proxy game detail pages or component downloads.
+
 ## Build and validate
 
 Requires Node 22, pnpm 10, Python 3.11+ and a BCJ2-capable `7z`, `7zz`, `7za`, `7zr` or `bsdtar` (SteamOS includes supported extractors).

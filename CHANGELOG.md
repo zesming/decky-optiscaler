@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.9] - 2026-11-17
+
+- In this fork, retry failed game-list updates through two public Wiki raw-file proxies. Reject invalid responses, keep the last good list when all sources fail, and use shorter per-source timeouts.
+
+[0.0.9]: https://github.com/zesming/decky-optiscaler/releases/tag/v0.0.9
+
 ## [0.0.8] - 2026-11-17
 
 The first formal 0.0.8 release bundles the complete official OptiScaler 0.9.5 package.
