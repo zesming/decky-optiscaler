@@ -1142,6 +1142,132 @@ def check_wiki_cache():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_wiki_mirrors():
+    """A blocked origin must refresh through a mirror without losing good data."""
+    from unittest.mock import patch
+    from optiscaler import wiki
+
+    print("\nWiki mirror fallback")
+    table = ("| Game | Compatibility | Inputs |\n|---|---|---|\n"
+             "| [Cyberpunk 2077](Cyberpunk-2077) | OK | DLSS |\n")
+    origin = f"{wiki.WIKI_RAW_BASE}/{wiki.COMPAT_LIST_PAGE}"
+    urls = [origin] + [prefix + origin.removeprefix("https://") for prefix in wiki.COMPAT_LIST_MIRRORS]
+    with tempfile.TemporaryDirectory(prefix="optiscaler-mirrors-") as temporary:
+        client = wiki.WikiClient(Path(temporary))
+        with patch.object(wiki, "_http_get", return_value=table) as get:
+            result = client.revalidate()
+            check("a working origin never contacts a mirror", result["ok"]
+                  and get.call_count == 1 and get.call_args.args[0] == origin)
+
+        failures = [TimeoutError("blocked"),
+                    urllib.error.HTTPError(origin, 403, "Forbidden", {}, None),
+                    "<html><body>\n" + table + "</body></html>", "", "not a table"]
+        for failure in failures:
+            with patch.object(wiki, "_http_get", side_effect=[failure, table]) as get:
+                result = client.revalidate()
+                calls = get.call_args_list
+                check(f"origin {type(failure).__name__} failure reaches a valid mirror",
+                      result["ok"] and result["count"] == 1 and client.last_error is None
+                      and [c.args[0] for c in calls] == urls[:2])
+                check("wiki attempts use short timeouts and mirrors require verified TLS",
+                      all(c.kwargs["timeout"] == wiki.COMPAT_FETCH_TIMEOUT for c in calls)
+                      and calls[1].kwargs["allow_unverified"] is False)
+
+        with patch.object(wiki, "_http_get", side_effect=[TimeoutError("blocked"),
+                          "<html>unavailable</html>", table]) as get:
+            check("an invalid first mirror falls through to the next",
+                  client.revalidate()["ok"] and [c.args[0] for c in get.call_args_list] == urls)
+
+        before = client.list_cache.read_bytes()
+        revision = client.revision()
+        with patch.object(wiki, "_http_get", side_effect=TimeoutError("all blocked")):
+            result = client.revalidate()
+            check("total failure keeps the cache and its fetched time unchanged",
+                  not result["ok"] and client.list_cache.read_bytes() == before
+                  and client.revision() == revision and client.status()["available"])
+            check("total failure identifies every attempted source",
+                  all(url in result["error"] for url in urls))
+        with patch.object(wiki, "_http_get", return_value=table) as get:
+            check("a later refresh retries the origin and clears the old error",
+                  client.revalidate()["ok"] and client.last_error is None
+                  and get.call_count == 1 and get.call_args.args[0] == origin)
+
+    # A prior origin fetch can leave the transport's legacy unverified context
+    # cached. Mirrors must neither reuse it nor select it as a last resort.
+    import ssl
+    verified = ssl.create_default_context()
+    unverified = ssl._create_unverified_context()
+    with patch.object(wiki, "_ssl_context", unverified), \
+            patch.object(wiki, "_ssl_context_kind", "unverified"), \
+            patch.object(wiki, "_candidate_contexts", return_value=iter([
+                ("default", verified), ("unverified", unverified)])), \
+            patch.object(wiki, "_open", side_effect=ssl.SSLError("bad certificate")) as opened:
+        try:
+            wiki._http_get(urls[1], allow_unverified=False)
+        except ssl.SSLError:
+            pass
+        check("mirror TLS failure never falls back to an unverified connection",
+              opened.call_count == 1 and opened.call_args.args[2] is verified)
+
+
+    with tempfile.TemporaryDirectory(prefix="optiscaler-mirror-timeouts-") as temporary:
+        waits = []
+        def stalled_sources(request, timeout, context, binary=False, **policy):
+            if request.full_url != urls[-1]:
+                waits.append(timeout)
+                raise TimeoutError("blackholed source")
+            return table
+        with patch.object(wiki, "_ssl_context", verified), \
+                patch.object(wiki, "_ssl_context_kind", "default"), \
+                patch.object(wiki, "_open", side_effect=stalled_sources):
+            client = wiki.WikiClient(temporary)
+            result = client.revalidate()
+            check("the final mirror updates after both earlier sources exhaust IPv4 retries",
+                  result["ok"] and result["changed"] and len(waits) == 4
+                  and sum(waits) == 12 and client.status()["entry_count"] == 1)
+
+    # Redirect checks run before the next hop, for both normal and IPv4 opens.
+    handler = wiki._HTTPSOnlyRedirectHandler()
+    request = wiki.urllib.request.Request(urls[1])
+    for destination in ("http://mirror.invalid/list", "ftp://mirror.invalid/list"):
+        try:
+            handler.redirect_request(request, None, 302, "Found", {}, destination)
+            check("insecure mirror redirects are rejected", False)
+        except urllib.error.URLError:
+            check("insecure mirror redirects are rejected", True)
+    check("HTTPS mirror redirects remain usable", handler.redirect_request(
+        request, None, 302, "Found", {}, urls[2]).full_url == urls[2])
+
+    from unittest.mock import MagicMock
+    from email.message import Message
+    headers = Message()
+    headers["Content-Type"] = "text/html; charset=utf-8"
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.headers = headers
+    with patch.object(wiki.urllib.request, "urlopen", return_value=response):
+        try:
+            wiki._open(request, 3, verified, raw_markdown=True)
+            check("HTML MIME is rejected even without HTML wrapper tags", False)
+        except ValueError:
+            check("HTML MIME is rejected even without HTML wrapper tags",
+                  not response.read.called)
+    for ipv4 in (False, True):
+        opener = MagicMock()
+        opener.open.return_value = response
+        headers.replace_header("Content-Type", "text/plain")
+        response.read.return_value = table.encode()
+        with patch.object(wiki.urllib.request, "build_opener", return_value=opener) as build:
+            token = wiki._force_ipv4.set(ipv4)
+            try:
+                wiki._open(request, 3, verified, require_https=True, raw_markdown=True)
+            finally:
+                wiki._force_ipv4.reset(token)
+            check("both address-family paths enforce HTTPS redirects", any(
+                isinstance(h, wiki._HTTPSOnlyRedirectHandler) for h in build.call_args.args))
+
+
+
 def check_wiki_transport():
     """The fetch has to survive the ways one Deck's network differs.
 
@@ -2123,6 +2249,7 @@ def main():
     check_wiki_failure_reporting()
     check_wiki_cache()
     check_wiki_transport()
+    check_wiki_mirrors()
     check_wiki_tls()
     check_version_pin()
     check_optipatcher()
