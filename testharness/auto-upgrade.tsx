@@ -85,7 +85,7 @@ function gameDetail(item: UpgradeCase) {
       installed: true,
       filename: "dxgi.dll",
       managed: true,
-      version: item.current ? "0.9.5-pre5" : "0.9.4",
+      version: item.current ? "0.9.5" : "0.9.4",
       runtime_current: item.current,
       runtime_upgrade_held: item.held,
       rollback: { available: false },
@@ -248,7 +248,7 @@ fixtures.set_auto_mode = (_gamePath: string, enabled: boolean) => ({ ok: true, e
 fixtures.apply_auto_settings = { ok: true, applied: [], rejected: [] };
 fixtures.rollback_install = { ok: true, launch_options: "" };
 
-const bundleStatus: any = { version: "0.9.5-pre5", optiscaler_version: "0.9.5-pre5" };
+const bundleStatus: any = { version: "0.9.5", optiscaler_version: "0.9.5" };
 
 async function mount(item: UpgradeCase, runningGame: any = null) {
   const host = document.createElement("div");

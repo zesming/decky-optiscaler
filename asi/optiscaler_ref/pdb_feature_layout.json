@@ -1,21 +1,33 @@
 {
-  "pdb_guid": "4abc9225-c8f1-462c-84c6-9d58d3db483e",
-  "pdb_sha256": "8b91c200be92dc2de89bf90c7548b8dd975f39b4d806ea7882f29096081218cd",
+  "pdb_guid": "0d15e219-e646-4c8a-a03a-f682cbeff6e6",
+  "pdb_sha256": "73edcdda3e1bbd35f593f84f92d7d7b8a39f71f6802266ff3c98e25511fd214f",
   "live_apply_proofs": {
     "feature_version": {
-      "type_index": "0x7fb3",
+      "type_index": "0x7fd2",
       "size": 12,
       "fields": [
-        ["major", 0, "0x75"],
-        ["minor", 4, "0x75"],
-        ["patch", 8, "0x75"]
+        [
+          "major",
+          0,
+          "0x75"
+        ],
+        [
+          "minor",
+          4,
+          "0x75"
+        ],
+        [
+          "patch",
+          8,
+          "0x75"
+        ]
       ],
       "record_hex": "0515000080020000000000000000000000000000666561747572655f76657273696f6e002e3f4155666561747572655f76657273696f6e404000"
     },
     "dlss_feature_version": {
       "member": "_version",
       "member_offset": 8,
-      "member_type_index": "0x7fb3",
+      "member_type_index": "0x7fd2",
       "derived_classes": {
         "DLSSFeatureDx11": {
           "class_size": 256,

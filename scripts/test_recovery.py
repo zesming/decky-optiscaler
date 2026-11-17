@@ -765,6 +765,68 @@ with installer.target_transaction(target, require_stopped=True):
         self.assertTrue(manual['ok'], manual)
         self.assertFalse(restarted.settings.get_pref('runtime-upgrade-hold:' + str(self.game.resolve())))
 
+    def test_pre5_upgrade_preserves_settings_and_can_restore_the_old_bridge(self):
+        old = self.prepare_auto_upgrade()
+        manifest = installer.read_manifest(self.game)
+        manifest['optiscaler_version'] = '0.9.5-pre5'
+        old_bridge = b'MZ recognized pre5 bridge'
+        bridge = self.game / 'plugins' / live.ASI_NAME
+        bridge.parent.mkdir(exist_ok=True)
+        bridge.write_bytes(old_bridge)
+        manifest['live_asi'] = True
+        manifest['files'] = list(dict.fromkeys([*manifest['files'], 'plugins/' + live.ASI_NAME]))
+        manifest['created_directories'] = list(dict.fromkeys([*manifest.get('created_directories', []), 'plugins']))
+        (self.game / constants.MANIFEST_NAME).write_text(json.dumps(manifest))
+        before = tree(self.game)
+        with patch.object(constants, 'UPGRADE_RUNTIME_HASHES',
+                          {'0.9.5-pre5': hashlib.sha256(old).hexdigest()}), \
+             patch.object(constants, 'UPGRADE_LIVE_ASI_SHA256',
+                          (hashlib.sha256(old_bridge).hexdigest(),)):
+            result = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.game)))
+            self.assertTrue(result['ok'] and result['upgraded'], result)
+            self.assertEqual(installer.read_manifest(self.game)['optiscaler_version'], constants.OPTISCALER_VERSION)
+            self.assertNotEqual(bridge.read_bytes(), old_bridge)
+            rolled = asyncio.run(self.service.rollback_install(str(self.game), str(self.game)))
+            self.assertTrue(rolled['ok'], rolled)
+            self.assertEqual(tree(self.game), before)
+            removed = asyncio.run(self.service.uninstall(str(self.game)))
+            self.assertTrue(removed['ok'], removed)
+            self.assertFalse(bridge.exists())
+
+    def test_pre5_snapshot_accepts_new_vulkan_files_and_restores_adopted_originals(self):
+        additions = {'amd_fidelityfx_upscaler_vk.dll', 'amd_fidelityfx_framegeneration_vk.dll'}
+        self.prepare_auto_upgrade()
+        # Capture the inventory an actual pre5 plugin knew, before the official
+        # release expanded file ownership. One new name is a game original;
+        # the other was absent. The snapshot remains immutable through upgrade.
+        manifest = installer.read_manifest(self.game)
+        manifest['files'] = [name for name in manifest['files'] if name not in additions]
+        manifest['optiscaler_version'] = '0.9.5-pre5'
+        (self.game / constants.MANIFEST_NAME).write_text(json.dumps(manifest))
+        for name in additions:
+            (self.game / name).unlink(missing_ok=True)
+        original = self.game / 'amd_fidelityfx_upscaler_vk.dll'
+        original.write_bytes(b'original game Vulkan upscaler')
+        original.chmod(0o640)
+        before = tree(self.game)
+        allowed = installer._allowed_file_names
+        with patch.object(installer, '_allowed_file_names', side_effect=lambda: allowed() - additions):
+            point = asyncio.run(self.service.create_restore_point(str(self.game), str(self.game), 'wrapper %command%'))
+        self.assertTrue(point['ok'], point)
+        snapshot_before = filesystem_state(self.game / restorepoint.RESTORE_DIR)
+        old = (self.game / 'winmm.dll').read_bytes()
+        with patch.object(constants, 'UPGRADE_RUNTIME_HASHES',
+                          {'0.9.5-pre5': hashlib.sha256(old).hexdigest()}):
+            result = asyncio.run(self.service.upgrade_runtime(str(self.game), str(self.game)))
+        self.assertTrue(result['ok'] and result['upgraded'], result)
+        self.assertEqual(filesystem_state(self.game / restorepoint.RESTORE_DIR), snapshot_before)
+        self.assertTrue(all((self.game / name).is_file() for name in additions))
+        rolled = asyncio.run(self.service.rollback_install(str(self.game), str(self.game)))
+        self.assertTrue(rolled['ok'], rolled)
+        self.assertEqual(tree(self.game), before)
+        self.assertEqual(stat.S_IMODE(original.stat().st_mode), 0o640)
+        self.assertEqual(filesystem_state(self.game / restorepoint.RESTORE_DIR), snapshot_before)
+
     def test_automatic_upgrade_is_idempotent_and_defers_a_running_game(self):
         self.install()
         before = tree(self.game)

@@ -998,7 +998,7 @@ OPTIONS = [
         "key": "Fsr4ForceEnableInt8",
         "label": "Fsr4 Force Enable Int8",
         "description": "Enables INT8 model for all GPUs 0 = Disabled, 1 = Force INT8, 2 = Force INT8 RDNA2, 3 = Force INT8 Lite",
-        "default": "0",
+        "default": "3 for AMD APUs, 0 for others",
         "type": "enum",
         "options": [
             "0",

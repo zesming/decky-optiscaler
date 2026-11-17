@@ -931,6 +931,7 @@ def _preflight_live_asi_identity(target, live_asi=None, plugin_root=None,
 
     expected = {
         getattr(constants, "LEGACY_LIVE_ASI_SHA256", ""),
+        *getattr(constants, "UPGRADE_LIVE_ASI_SHA256", ()),
         live.known_asi_sha256(plugin_root),
     }
     if live_asi is not None:
@@ -961,9 +962,10 @@ def _preflight_live_asi_identity(target, live_asi=None, plugin_root=None,
                 raise ValueError(
                     f"Cannot safely upgrade because {entry.name} has unknown bytes."
                 )
-            found_legacy = found_legacy or actual_hash == getattr(
-                constants, "LEGACY_LIVE_ASI_SHA256", ""
-            )
+            found_legacy = found_legacy or actual_hash in {
+                getattr(constants, "LEGACY_LIVE_ASI_SHA256", ""),
+                *getattr(constants, "UPGRADE_LIVE_ASI_SHA256", ()),
+            }
         elif actual_hash in expected:
             raise ValueError(
                 f"Cannot safely upgrade because a renamed live ASI may load: {entry.name}."
@@ -1334,6 +1336,7 @@ def _assert_known_live_asi(path):
     digest = _sha256_file(path)
     expected = {
         getattr(constants, "LEGACY_LIVE_ASI_SHA256", ""),
+        *getattr(constants, "UPGRADE_LIVE_ASI_SHA256", ()),
         live.known_asi_sha256(),
     }
     expected.discard(None)
@@ -2106,7 +2109,7 @@ def _preflight_live_control(target, ini_path=None, live_asi=None,
                             reject_command_alias=False):
     """Validate live paths and refuse unknown or renamed versions of our ASI.
 
-    ``ini_path`` can be a caller's staged final INI. A known 0.9.4 ASI is
+    ``ini_path`` can be a caller's staged final INI. A known older ASI is
     upgradeable while the game is stopped; anything else under our canonical
     name, or a renamed copy of either known build, is refused.
     """

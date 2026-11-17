@@ -27,9 +27,13 @@ def files(target):
 async def verify():
  payload_root=Path(await service.ensure_payload())
  provenance=json.loads((plugin/'defaults/runtime-manifest.json').read_text())
+ assert constants.OPTISCALER_VERSION == '0.9.5' and provenance['experimental'] is False
  for name,expected in provenance['files'].items():
   data=(payload_root/name).read_bytes()
   assert len(data)==expected['bytes'] and hashlib.sha256(data).hexdigest()==expected['sha256'],name
+ assert fsr4build.identify(payload_root/constants.FFX_UPSCALER_DLL)['id']=='bundled'
+ assert installer.pe_file_version(payload_root/constants.FFX_UPSCALER_DLL)[:3]==(4,1,2)
+ assert (payload_root/'amd_fidelityfx_upscaler_vk.dll').is_file()
  game=root/'PBZ';target=game/'platform/steam';target.mkdir(parents=True)
  (target/'PBZ.exe').write_bytes(b'MZ synthetic game executable')
  (target/'dxgi.dll').write_bytes(b'original game proxy')

@@ -30,6 +30,7 @@ import {
   needsForcedInt8,
   runningBackend,
   supportsInt8Override,
+  supportsOfficialInt8,
   supportsMultiplier,
   usesFfxFrameGen,
   usesFfxUpscaler,
@@ -389,7 +390,8 @@ export function BasicPanel({
   // the INT8 preset is the one that does nothing.
   const fsr4Selected = upscalerPreset?.id === "fsr4";
   const int8Selected = upscalerPreset?.id === "fsr4-int8";
-  const int8Route = needsForcedInt8(gpu) && (fsr4Build === "4.1.1b" || supportsInt8Override(ffx));
+  const int8Route = needsForcedInt8(gpu) && !supportsOfficialInt8(ffx) &&
+    (fsr4Build === "4.1.1b" || supportsInt8Override(ffx));
   const liveReady = currentLiveContext(reportedLive, bindingTarget) !== null;
   const liveRuntimeVerified = hasVerifiedLiveRuntime(reportedLive);
 
@@ -1226,9 +1228,8 @@ export function BasicPanel({
         ) : fsr4Selected && !compact ? (
           <PanelSectionRow>
             <Notice tone="info" title="FSR 4 selected">
-              Uses the FidelityFX 4.1 library bundled with OptiScaler. OptiScaler only picks
-              FSR 4 by itself on RDNA 4, which is why choosing it here also sets the FSR
-              backend explicitly.
+              Uses the installed FidelityFX library. Official 4.1.2 includes RDNA2 and APU
+              INT8 models. Verify the active model with the in-game FSR watermark.
             </Notice>
           </PanelSectionRow>
         ) : null}

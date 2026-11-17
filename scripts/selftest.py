@@ -184,6 +184,10 @@ async def run():
         print("\nSchema generation")
         from optiscaler.schema_generated import OPTIONS  # noqa: E402
         by_id = {(o["section"], o["key"]): o for o in OPTIONS}
+        int8 = by_id[("FSR", "Fsr4ForceEnableInt8")]
+        check("automatic INT8 model retains its GPU-dependent default",
+              int8["default"] == "3 for AMD APUs, 0 for others"
+              and int8["options"] == ["0", "1", "2", "3"])
         multiplier = by_id[("XeFG", "InterpolationCount")]
         check("frame multiplier is a 2X/3X/4X choice, not a toggle",
               multiplier["type"] == "enum" and multiplier["options"] == ["1", "2", "3"],
@@ -1267,7 +1271,7 @@ def check_version_pin():
         check("every mirrored member still exists in the vendored header",
               not absent, absent[:5])
 
-    # The pinned pre5 core stores upscaler IDs as strings.
+    # The pinned release core stores upscaler IDs as strings.
     check("the vendored build stores upscalers as strings",
           "CustomOptional<std::string, SoftDefault> Dx12Upscaler" in config_h)
 
@@ -2042,7 +2046,7 @@ def check_option_validation():
     presets = {
         "fsr4": [("Upscalers", "Dx12Upscaler", "fsr31"), ("Upscalers", "Dx11Upscaler", "fsr31_12"),
                  ("Upscalers", "VulkanUpscaler", "fsr31_12"), ("FSR", "Fsr4Update", "true"),
-                 ("FSR", "UpscalerIndex", "0"), ("FSR", "Fsr4ForceEnableInt8", "0")],
+                 ("FSR", "UpscalerIndex", "0"), ("FSR", "Fsr4ForceEnableInt8", "auto")],
         "fsr4-int8": [("Upscalers", "Dx12Upscaler", "fsr31"),
                       ("Upscalers", "Dx11Upscaler", "fsr31_12"),
                       ("Upscalers", "VulkanUpscaler", "fsr31_12"),
@@ -2093,7 +2097,7 @@ def check_live_bridge_contract():
     members = set(re.findall(r"offsetof\(Config,\s*(\w+)\)", assertions))
     # The writable-field table excludes the three plain path/string members.
     # The compiled PDB assertions cover the complete object, including those.
-    check("the pre5 mirror checks all 300 independently pinned members",
+    check("the release mirror checks all 300 independently pinned members",
           len(members) == 300 and members == set(facts["classes"]["Config"]["fields"]))
     with tempfile.TemporaryDirectory(prefix="optiscaler-live-contract-") as temporary:
         target = Path(temporary)

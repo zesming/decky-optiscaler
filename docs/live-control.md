@@ -1,6 +1,6 @@
 # Native live control
 
-The bridge supports this package’s exact OptiScaler 0.9.5-pre5 core. Each game needs its own matching `plugins/decky_optiscaler_live.asi` and ASI-loading configuration. Close the game and upgrade or add live control in Setup. Updating Decky does not replace modules already loaded by a game.
+The bridge is calibrated to this package’s exact official OptiScaler 0.9.5 core and PDB. It retains all 14 live controls: frame-generation enable, HUD fix, debug view, depth copy, extended HUD fix, XeFG interpolation count, FFX frame-generation and upscaler versions, DX11/DX12/Vulkan upscalers, sharpness override and value, and FPS display. Each game needs its own matching `plugins/decky_optiscaler_live.asi` and ASI-loading configuration. Close the game and upgrade or add live control in Setup. Recognized managed 0.9.4 and 0.9.5-pre5 installs are upgraded with the matching bridge. Updating Decky does not replace modules already loaded by a game.
 
 ## Connection and results
 

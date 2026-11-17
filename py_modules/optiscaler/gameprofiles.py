@@ -68,9 +68,8 @@ def constrain(plan, result):
     result = result or {}
     if not (is_pbz(result.get("game")) and result.get("required_target") == PBZ_TARGET):
         return plan
-    # This precise pre5 build contains the PBZ ExtendedSearch and input fixes;
-    # this is a capability pin, not a claim that every prerelease >= a final.
-    supported = OPTISCALER_VERSION == "0.9.5-pre5"
+    # The reviewed official release contains the PBZ ExtendedSearch and input fixes.
+    supported = OPTISCALER_VERSION == "0.9.5"
     plan.update(required_version="0.9.5", required_target=PBZ_TARGET,
                 manual_steps=list(PBZ_STEPS), runtime_supported=supported,
                 blocked_reason=None if supported else "Phantom Blade Zero requires the pinned 0.9.5+ compatibility fixes. Upgrade this plugin first.")

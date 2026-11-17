@@ -1,4 +1,4 @@
-"""Schema-7 live control for the pinned OptiScaler 0.9.5-pre5 runtime.
+"""Schema-7 live control for the pinned OptiScaler 0.9.5 runtime.
 
 The ASI and this module exchange bounded, newline-delimited files in the game
 folder. A receipt confirms that the native menu path accepted a configuration request.

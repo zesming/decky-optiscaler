@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.8] - 2026-11-17
+
+The first formal 0.0.8 release bundles the complete official OptiScaler 0.9.5 package.
+
+### Added
+
+- Official FFX SDK 2.4 and FSR 4.1.2, with official support for RDNA2 and some APUs.
+- Automatic upgrades for recognized managed 0.9.4 and 0.9.5-pre5 installs, preserving the INI, installed components, launch options and a restore snapshot.
+- A live-control bridge calibrated against the 0.9.5 core and PDB, retaining all 14 live controls.
+
+### Changed
+
+- Keep **FSR 4.1.1b — Steam Deck** as an explicit optional community preset. Existing selections are preserved during upgrades and are not silently changed to the official upscaler.
+- Require checking the FSR4 watermark to confirm the active model. Existing Steam Deck evidence is from the pre5 build and does not verify the final package on-device.
+
+[0.0.8]: https://github.com/zesming/decky-optiscaler/releases/tag/v0.0.8
+
 ## 0.0.8-pbz.3 (experimental)
 
 - Automatically upgrade recognized managed 0.9.4 installs when opened with the game closed, preserving settings and taking a restore point; respect explicit rollback.
@@ -24,7 +41,8 @@
 
 
 Newest first. Each release ships `Decky OptiScaler.zip` for Decky Loader's
-*Install from URL* (Developer mode). The experimental build above pins **OptiScaler 0.9.5-pre5**; historical releases below bundle **0.9.4**.
+*Install from URL* (Developer mode). The experimental 0.0.8-pbz entries above
+document earlier builds; historical releases below bundle **0.9.4**.
 
 ## [Unreleased]
 

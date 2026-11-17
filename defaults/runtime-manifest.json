@@ -1,22 +1,16 @@
 {
-  "version": "0.9.5-pre5",
-  "experimental": true,
+  "version": "0.9.5",
+  "experimental": false,
   "runtime": {
     "repository": "optiscaler/OptiScaler",
-    "commit": "6cbd89b887f5f186c294e2fe2b3024692ea21007",
-    "run_id": 43116305456,
-    "artifact_id": 13898752558,
-    "artifact_sha256": "3835c3a80847bae2a9bb5d873a42e43d7cf504b172650bb54b7659b67e7fdf27",
-    "dll_sha256": "bd6fe5e7defdf7520ecd7a45eb3b5fe173d70551af5ad4a21b2837dd5d2e8a28",
+    "tag": "v0.9.5",
+    "commit": "90d9568d576d93ebb2d6c1c207596d21e9900651",
+    "release_url": "https://github.com/optiscaler/OptiScaler/releases/tag/v0.9.5",
+    "asset": "Optiscaler_0.9.5-final.20261116.7z",
+    "dll_sha256": "e2300905b2b7e6e14c8c4b02c0c555c4582fafc92a2e36e117ce027b7e259d59",
     "pe_version": "0.9.5.5"
   },
-  "support": {
-    "repository": "optiscaler/OptiScaler",
-    "tag": "v0.9.4",
-    "archive_sha256": "575cb4df866116093df75af607e37fd70e10f5163e0f23fd5c804142e80ef0ad",
-    "note": "0.9.4 support libraries (FFX SDK 2.2) retained for legacy community FSR 4.1.1b route. DX12 interface compatibility inspected; real Proton/game integration unverified. No native Navi2/FP8 model claim."
-  },
-  "archive_sha256": "05b10dfe5ab7d79a56bc553d66d0def1d0f6bdcd04ed11de80c0909964bb47a3",
+  "archive_sha256": "77e3ed76bed04e1fb32bacb5a72799ff172f3da22ed5231c0cf3e84fe6761662",
   "files": {
     "!! README_EXTRACT ALL FILES TO GAME FOLDER !!.txt": {
       "sha256": "09051e971a9a1bf7a1500a041b2a4652414a13d23266709cdb41e4ec12208ade",
@@ -43,28 +37,36 @@
       "bytes": 4194
     },
     "OptiScaler.dll": {
-      "sha256": "bd6fe5e7defdf7520ecd7a45eb3b5fe173d70551af5ad4a21b2837dd5d2e8a28",
-      "bytes": 26051376
+      "sha256": "e2300905b2b7e6e14c8c4b02c0c555c4582fafc92a2e36e117ce027b7e259d59",
+      "bytes": 26052912
     },
     "OptiScaler.ini": {
-      "sha256": "9cc69311eed6fcd96163aad9520a9190132fdbdf06f68c3905283aaa213a2f31",
-      "bytes": 46276
+      "sha256": "4f3314dc1fc4ecad800b2ce99c2adf972eda3954504dc3a273487ddaab75924d",
+      "bytes": 47713
     },
     "amd_fidelityfx_dx12.dll": {
-      "sha256": "e2d85aa05a9bd9ed8b38935fdf5199372cca6f74c12015143bb6f945ee1608aa",
-      "bytes": 26376
+      "sha256": "e2191d3c0828be45eb8affd4e3ec0378f2293adc345b772a7170edcf3b021ecb",
+      "bytes": 39184
     },
     "amd_fidelityfx_framegeneration_dx12.dll": {
-      "sha256": "02297beedd285e822d3a64f314cf00faf378dcec0edc47ff0c4dd71b3a8c2f18",
-      "bytes": 40085776
+      "sha256": "e6843252f58b0341a0d80f6a20bc0d840643ee95bc48c22cac08745344577bb6",
+      "bytes": 29679376
+    },
+    "amd_fidelityfx_framegeneration_vk.dll": {
+      "sha256": "d002dabff8c5e71eaa715fc99438cd4dc81230262a7897b16bc402efec3498b4",
+      "bytes": 36806928
     },
     "amd_fidelityfx_upscaler_dx12.dll": {
-      "sha256": "d0dcccc74a43c44ba435b7a369b456e0970d8a4464e4bd683119b374f2c9fb46",
-      "bytes": 28761864
+      "sha256": "aad4fccccb29084a655f9a4f9f613bd22c8c03fb4a0f8840148cc6543b4ccace",
+      "bytes": 57664272
+    },
+    "amd_fidelityfx_upscaler_vk.dll": {
+      "sha256": "4a7e895af6e0b615d40a84d59eb8c2b1054ad91cdd0c739567940270d51bdab7",
+      "bytes": 36135696
     },
     "amd_fidelityfx_vk.dll": {
-      "sha256": "a1624cc4238fef046f30c4d80ce3f47be63fc5f5373f49e3ee9edb9960f54c78",
-      "bytes": 9332432
+      "sha256": "38a56a01fb3565c0757d9f5c1e4e69de4b65e5f2e5769b323b200dc1f142bab9",
+      "bytes": 39184
     },
     "dlssg_to_fsr3_amd_is_better.dll": {
       "sha256": "806020c0444f7841a3a9f661295c16fc482e981e0666d0b9624bf6ccd19c4b5e",
@@ -79,8 +81,8 @@
       "bytes": 466
     },
     "libxell.dll": {
-      "sha256": "61aeeab7fdcfb6d1742f86c14c68c663d759607d01a6132645c857291eaebb86",
-      "bytes": 411504
+      "sha256": "d2030dcd694fda8f2ec7e044b13e6db8f0b56d4ba9113a5efad334e3f3ded8c7",
+      "bytes": 415368
     },
     "libxess.dll": {
       "sha256": "251659dd84a3e84de67c886a4186e01f3eca49b00641906fe38bb6b807e5d5b7",
@@ -103,15 +105,13 @@
       "bytes": 16947
     }
   },
-  "live_control_supported": true,
-  "community": {
-    "repository": "the3rdparty1917/fsr4xyz",
-    "tag": "4.1.1b",
-    "asset": "FSR_4.1.1b_INT8_with_RDNA2_fix.7z",
-    "archive_sha256": "66e9a818e0c914def7712c8dac06b08e64a64dbcfe77f3162d43ea6de93869ff",
-    "archive_bytes": 3456158,
-    "dll_sha256": "0dd77d9c78d1ef9bc330cf4697ab3ffe24bc1aa7850e4130263dc922107fbd75",
-    "dll_bytes": 34013696,
-    "model": "1 (generic INT8, community RDNA2 fix)"
+  "symbols": {
+    "repository": "optiscaler/OptiScaler",
+    "run_id": 43931922272,
+    "artifact_id": 14259062093,
+    "pdb_sha256": "73edcdda3e1bbd35f593f84f92d7d7b8a39f71f6802266ff3c98e25511fd214f",
+    "pdb_guid": "0d15e219-e646-4c8a-a03a-f682cbeff6e6",
+    "pdb_age": 1,
+    "note": "Actions artifact DLL is byte-identical to the official release DLL; PDB GUID and age match its PE debug identity."
   }
 }

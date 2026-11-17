@@ -17,9 +17,9 @@ interface Props {
 const GPU_NOTE: Record<string, string> = {
   native: "This GPU runs FSR 4 natively.",
   int8: "This GPU can run FSR 4 through the INT8 model.",
-  experimental: "Select FSR 4.1.1b — Steam Deck in Basic settings for experimental RDNA2 upscaling.",
+  experimental: "Official 4.1.2 includes APU INT8 models. The community 4.1.1b preset remains an optional alternative.",
   unsupported:
-    "AMD supports FSR 4 on RDNA 3 and RDNA 4 only. RDNA 2 — which includes the Steam Deck — is not supported yet.",
+    "Official FSR 4.1.2 supports selected AMD GPUs and APUs. Other devices may require a forced model; verify the in-game watermark.",
   unknown: "Could not identify this GPU from sysfs.",
 };
 
@@ -96,8 +96,9 @@ export function Fsr4Panel({
       {ffx?.fsr4_capable ? (
         <PanelSectionRow>
           <Notice tone="success" title="FSR 4 is present">
-            On Steam Deck, select <b>FSR 4.1.1b — Steam Deck</b> in Basic settings.
-            This installs the community RDNA2 fix and enables INT8 upscaling.
+            Official FSR 4.1.2 is bundled. Select <b>FSR 3.X/4</b> in Basic settings
+            to use the installed library, then verify the active model with the in-game watermark.
+            The community 4.1.1b preset replaces this DLL only when selected.
           </Notice>
         </PanelSectionRow>
       ) : null}

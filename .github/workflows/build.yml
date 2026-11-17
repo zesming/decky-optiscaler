@@ -47,7 +47,9 @@ jobs:
           git diff --exit-code -- asi/generated py_modules/optiscaler/live_fields.json
 
       - name: Verify native bridge identity
-        run: python3 scripts/live_metadata.py --check
+        run: |
+          python3 scripts/live_metadata.py --check
+          python3 scripts/verify_runtime_profile.py
 
       - name: Typecheck
         run: npx tsc --noEmit

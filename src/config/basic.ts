@@ -40,7 +40,7 @@ function upscalerPreset(
   dx11: string,
   vulkan: string,
   fsr4Update?: boolean,
-  int8?: boolean
+  int8?: boolean | "auto"
 ): Preset {
   const changes = [
     change("Upscalers", "Dx12Upscaler", dx12),
@@ -61,7 +61,7 @@ function upscalerPreset(
     // The pinned runtime reads an integer mode: 0 disables forcing, while 1
     // forces the general INT8 model. Model 2 is RDNA2-specific and is only
     // written by an explicit profile after its compatibility is verified.
-    changes.push(change("FSR", "Fsr4ForceEnableInt8", int8 ? "1" : "0"));
+    changes.push(change("FSR", "Fsr4ForceEnableInt8", int8 === "auto" ? AUTO : int8 ? "1" : "0"));
   }
   return {
     id,
@@ -74,6 +74,9 @@ function upscalerPreset(
       // A preset that writes the override off is not the one in force while it
       // is on: the INT8 route cannot be described by any other preset's flag.
       if (int8 === false && get(values, "FSR", "Fsr4ForceEnableInt8") !== "0") {
+        return false;
+      }
+      if (int8 === "auto" && !isAuto(get(values, "FSR", "Fsr4ForceEnableInt8"))) {
         return false;
       }
       const flag = get(values, "FSR", "Fsr4Update");
@@ -126,8 +129,8 @@ export const UPSCALER_PRESETS: Preset[] = [
   upscalerPreset(
     "fsr4",
     "FSR 3.X/4",
-    "OptiScaler's FidelityFX backend with FSR 4 turned on. Needs an RDNA 3 or RDNA 4 GPU.",
-    "fsr31", "fsr31_12", "fsr31_12", true, false
+    "Uses the installed FSR 4 library with automatic model selection. Bundled 4.1.2 includes APU INT8 Lite; verify the in-game watermark.",
+    "fsr31", "fsr31_12", "fsr31_12", true, "auto"
   ),
   upscalerPreset(
     "fsr31",
@@ -293,6 +296,14 @@ export function isFsr4Version(name: string | null | undefined): boolean {
  */
 export function needsForcedInt8(gpu: GpuInfo | null | undefined): boolean {
   return gpu?.fsr4 === "experimental" || gpu?.fsr4 === "unsupported";
+}
+
+/** Whether this SDK includes the official RDNA2/APU INT8 models. */
+export function supportsOfficialInt8(ffx?: { version?: string | null } | null): boolean {
+  const parts = String(ffx?.version ?? "").split(".").slice(0, 3).map(Number);
+  return parts.length === 3 && parts.every(Number.isFinite) &&
+    (parts[0] > 4 || (parts[0] === 4 &&
+      (parts[1] > 1 || (parts[1] === 1 && parts[2] >= 2))));
 }
 
 /**

@@ -722,6 +722,36 @@ const tile = (host: Element, label: string) => {
   detail.install.fsr4.ffx.version = "4.1.1.2740";
   setIni({ FSR: { Fsr4Update: "false", UpscalerIndex: "0" } });
 
+  console.log("=== official 4.1.2 APU model selection ===");
+  detail.install.fsr4.ffx.version = "4.1.2.0";
+  installedFsr4Build = "bundled";
+  setIni({
+    Upscalers: { Dx12Upscaler: "fsr31" },
+    FSR: { Fsr4ForceEnableInt8: "0", Fsr4Update: "true", UpscalerIndex: "0" },
+  });
+  const officialHost = document.createElement("div");
+  document.body.appendChild(officialHost);
+  const officialRoot = createRoot(officialHost);
+  await act(async () => {
+    officialRoot.render(<QuickPanel
+      runningGame={{ appid: 1091500, name: "Cyberpunk 2077", gameid: "1091500" }}
+      onOpenManager={() => {}}
+    />);
+  });
+  await settle();
+  check("explicit disabled INT8 is not labeled automatic model selection", selected(officialHost, "Override upscaler with") === "fsr4", false);
+  await act(async () => {
+    (all(control(officialHost, "Override upscaler with"), '[data-opt-value="fsr4"]')[0] as HTMLElement).click();
+  });
+  await settle(200);
+  check("official FSR4 preset enables the SDK upgrade path", ini.FSR.Fsr4Update, "true");
+  check("official FSR4 preset lets the runtime choose the APU model", ini.FSR.Fsr4ForceEnableInt8, "auto");
+  check("official FSR4 preset keeps the bundled DLL", installedFsr4Build, "bundled");
+  check("official SDK does not require the community preset", officialHost.textContent!.includes("install the RDNA2 build and enable INT8"), false);
+  await act(async () => officialRoot.unmount());
+  detail.install.fsr4.ffx.version = "4.1.1.2740";
+  setIni({ FSR: { Fsr4Update: "false", UpscalerIndex: "0" } });
+
   console.log("=== the live tiles ===");
   // The backend id cannot say which FSR is running and OptiScaler's own name
   // for it — "FSR 3.X/4" — says so out loud. The version list can, and the game

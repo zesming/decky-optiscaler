@@ -1,6 +1,6 @@
 {
-  "pdb_sha256": "8b91c200be92dc2de89bf90c7548b8dd975f39b4d806ea7882f29096081218cd",
-  "pdb_guid": "4abc9225-c8f1-462c-84c6-9d58d3db483e",
+  "pdb_sha256": "73edcdda3e1bbd35f593f84f92d7d7b8a39f71f6802266ff3c98e25511fd214f",
+  "pdb_guid": "0d15e219-e646-4c8a-a03a-f682cbeff6e6",
   "pdb_age": 1,
   "classes": {
     "Config": {
@@ -414,7 +414,7 @@
         "isRunningOnRDNA4": 1179,
         "isRunningOnRDNA3": 1181,
         "isRunningOnRDNA2": 1183,
-        "isPascalOrOlder": 1185,
+        "isPascalOrOlder": 1186,
         "workingMode": 1188,
         "vulkanCreatingSC": 1192,
         "creatingD3DDevice": 1193,
@@ -468,7 +468,8 @@
         "d3d11Devices": 2520,
         "adapterDescs": 2544,
         "_scBuffers": 2608,
-        "_scBuffersMutex": 2632
+        "_scBuffersMutex": 2632,
+        "isAmdApu": 1185
       }
     },
     "IFeature": {

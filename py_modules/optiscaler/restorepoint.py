@@ -15,6 +15,9 @@ RESTORE_DIR = ".decky_optiscaler_restore"
 SNAPSHOT_FILE = "snapshot.json"
 SNAPSHOT_LEGACY_VERSION = 1
 SNAPSHOT_VERSION = 2
+# These SDK files were first adopted by the complete 0.9.5 release payload.
+_RELEASE_095_ADDITIONS = {"amd_fidelityfx_upscaler_vk.dll",
+                          "amd_fidelityfx_framegeneration_vk.dll"}
 _DIGEST_CACHE = {}
 
 
@@ -239,9 +242,12 @@ def _validate_entry_inventory(target, record, content_root, accept_legacy=True):
     schema_version = record.get("schema_version")
     if schema_version == SNAPSHOT_VERSION:
         accepted = [current]
+        if accept_legacy:
+            accepted.append(sorted(set(current) - _RELEASE_095_ADDITIONS))
     elif schema_version == SNAPSHOT_LEGACY_VERSION and accept_legacy:
         accepted = [_legacy_candidate_paths(target),
                     _legacy_candidate_paths(target, legacy_live_inventory=True)]
+        accepted += [sorted(set(paths) - _RELEASE_095_ADDITIONS) for paths in accepted]
     else:
         raise ValueError("restore point uses an unsupported candidate inventory")
     expected = record.get("candidate_paths")
@@ -671,7 +677,8 @@ def restore(target_dir):
         # before a later install adopts it. Return that newly adopted original
         # before the old private backup tree replaces the current one. The
         # legacy f9283 snapshot does not list the three newer control temp
-        # names, so their current manifest backup/ownership is the only
+        # names or the two 0.9.5 Vulkan SDK files, so their current manifest
+        # backup/ownership is the only
         # permitted incremental evidence for those paths.
         for name in sorted(current_manifest.get("backups", {})):
             if name in prior_backups or name in installer._allowed_dir_names():

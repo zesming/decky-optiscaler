@@ -1,4 +1,4 @@
-// Production live control for the exact OptiScaler 0.9.5-pre5 profile.
+// Production live control for the exact OptiScaler 0.9.5 profile.
 // Only RenderMenu's boundary accesses mutable core state. The file worker
 // exchanges bounded value snapshots with it; neither CRT owns the other's data.
 #define __USE_MINGW_ANSI_STDIO 1
@@ -20,13 +20,13 @@ using namespace optimirror;
 using namespace runtime_profile;
 namespace live {
 static_assert(sizeof(void*) == 8, "x64 required");
-static_assert(sizeof(Config) == sizes_config, "pre5 Config ABI");
+static_assert(sizeof(Config) == sizes_config, "release Config ABI");
 static_assert(sizeof(CustomOptional<bool>) == 6, "MSVC optional bool ABI");
 static_assert(sizeof(CustomOptional<uint32_t>) == 24, "MSVC optional scalar ABI");
-static_assert(sizeof(msvc_deque_raw) == sizes_deque_double, "pre5 deque ABI");
+static_assert(sizeof(msvc_deque_raw) == sizes_deque_double, "release deque ABI");
 static_assert(offsetof(DXGI_ADAPTER_DESC, VendorId) == 256, "Windows SDK DXGI_ADAPTER_DESC layout");
-static_assert(offsetof(Config, FGEnabled) == 5860, "pre5 FG offset");
-static_assert(offsetof(Config, fileName) == 6640, "pre5 Config end");
+static_assert(offsetof(Config, FGEnabled) == 5860, "release FG offset");
+static_assert(offsetof(Config, fileName) == 6640, "release Config end");
 static const DWORD kExpectedTimestamp = pe_timestamp;
 static const DWORD kExpectedSizeOfImage = pe_size_of_image;
 static const DWORD kExpectedPdbAge = rsds_age;
